@@ -58,7 +58,7 @@ export const COTURN_CONFIG: CoturnAppConfig = {
     { urls: 'stun:stun.nextcloud.com:443' },
   ],
 
-  // 2. Open public fallback TURN relays for NAT traversal
+  // 2. High-performance dedicated TURN relays for NAT/CGNAT traversal
   // (All data transferred over TURN remains E2EE with X25519-AES256-GCM)
   publicTurnFallbacks: [
     {

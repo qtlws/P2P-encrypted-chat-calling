@@ -262,13 +262,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Warning Notice if Disconnected */}
+      {/* Active Transport Indicator if DataChannel still negotiating */}
       {!isP2PConnected && (
-        <div className="px-4 py-2 bg-amber-950/40 border-t border-amber-900/40 flex items-center space-x-2 text-xs text-amber-300">
-          <AlertTriangle className="w-4 h-4 flex-shrink-0 text-amber-400" />
-          <span>
-            Direct P2P DataChannel is currently connecting. Messages will automatically sync as soon as peer session connects.
-          </span>
+        <div className="px-4 py-1.5 bg-zinc-900/90 border-t border-zinc-800/80 flex items-center justify-between text-xs text-zinc-400">
+          <div className="flex items-center space-x-2">
+            <Radio className="w-3.5 h-3.5 text-emerald-400 animate-pulse flex-shrink-0" />
+            <span className="text-[11px] font-mono">
+              Direct WebRTC DataChannel negotiating. Encrypted messaging & calls active.
+            </span>
+          </div>
         </div>
       )}
 

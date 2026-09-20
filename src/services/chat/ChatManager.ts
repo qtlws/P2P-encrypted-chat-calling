@@ -521,22 +521,24 @@ export class ChatManager {
     const { ciphertext, iv } = await encryptAesGcm(plaintext, session.sessionKey, aad);
 
     // 2. Sign canonical wire payload with Ed25519 identity key
-    const wireMessage: WireMessage = {
+    const wireDataToSign = {
       protocolVersion: 1,
       id: messageId,
       conversationId,
       senderUid: this.identity.uid,
       recipientUid: peerUid,
       timestamp,
-      type: 'text',
+      type: 'text' as const,
       ciphertext,
       iv,
       senderFingerprint: this.identity.fingerprint,
-      signature: '',
     };
 
-    const signature = signCanonicalPayload(wireMessage, this.identity.identityPrivateKey);
-    wireMessage.signature = signature;
+    const signature = signCanonicalPayload(wireDataToSign, this.identity.identityPrivateKey);
+    const wireMessage: WireMessage = {
+      ...wireDataToSign,
+      signature,
+    };
 
     // 3. Dual transport delivery:
     // First attempt direct WebRTC DataChannel

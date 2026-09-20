@@ -54,6 +54,7 @@ export class PeerConnectionManager {
       iceServers: this.cachedIceServers && this.cachedIceServers.length > 0
         ? this.cachedIceServers
         : getActiveIceServers(),
+      iceTransportPolicy: 'all',
       iceCandidatePoolSize: 2,
     };
   }
