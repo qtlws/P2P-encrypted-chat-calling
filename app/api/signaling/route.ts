@@ -26,9 +26,21 @@ interface EphemeralClient {
   lastSeen: number;
 }
 
-// In-memory ephemeral registry
-const clients = new Map<string, EphemeralClient>();
-const messageQueues = new Map<string, QueuedSignal[]>();
+// In-memory ephemeral registry attached to globalThis to survive Next.js dev reloads
+const globalSignaling = globalThis as unknown as {
+  __ephemeral_signaling_clients?: Map<string, EphemeralClient>;
+  __ephemeral_message_queues?: Map<string, QueuedSignal[]>;
+};
+
+if (!globalSignaling.__ephemeral_signaling_clients) {
+  globalSignaling.__ephemeral_signaling_clients = new Map<string, EphemeralClient>();
+}
+if (!globalSignaling.__ephemeral_message_queues) {
+  globalSignaling.__ephemeral_message_queues = new Map<string, QueuedSignal[]>();
+}
+
+const clients = globalSignaling.__ephemeral_signaling_clients;
+const messageQueues = globalSignaling.__ephemeral_message_queues;
 
 const QUEUE_TTL_MS = 60000; // 60 seconds TTL for queued signaling envelopes
 const CLEANUP_INTERVAL_MS = 15000;

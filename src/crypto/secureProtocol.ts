@@ -110,7 +110,7 @@ export async function packSecureTransportMessage(params: {
     nonce,
     encrypted,
     payload: payloadStr,
-    iv: ivStr,
+    iv: ivStr || '',
   };
 
   const sig = signCanonicalPayload(unsignedBody, senderPrivateKey);
@@ -167,9 +167,22 @@ export async function unpackSecureTransportMessage(params: {
     return { valid: false, data: null, payload: null, error: 'Missing sender public key for packet verification' };
   }
 
-  // 1. Verify Ed25519 signature of the transport packet
-  const { sig, ...unsignedBody } = packet;
-  const isSigValid = verifyCanonicalPayload(unsignedBody, sig, senderPublicKey);
+  // 1. Verify Ed25519 signature of the exact transport packet fields
+  const signedFields = {
+    v: packet.v,
+    type: packet.type,
+    from: packet.from,
+    to: packet.to,
+    subType: packet.subType,
+    seq: packet.seq,
+    ts: packet.ts,
+    nonce: packet.nonce,
+    encrypted: packet.encrypted,
+    payload: packet.payload,
+    iv: packet.iv || '',
+  };
+
+  const isSigValid = verifyCanonicalPayload(signedFields, packet.sig, senderPublicKey);
   if (!isSigValid) {
     return { valid: false, data: null, payload: null, error: 'Transport signature invalid (tampered or spoofed)' };
   }
