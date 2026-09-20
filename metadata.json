@@ -1,0 +1,6 @@
+{
+  "name": "P2P Encrypted Chat & Calling",
+  "description": "Zero-knowledge peer-to-peer end-to-end encrypted messaging and video calling with client-side cryptographic identity and local storage.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
