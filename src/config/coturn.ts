@@ -1,16 +1,8 @@
 /**
  * COTURN, STUN, and ICE Infrastructure Configuration
  *
- * This configuration file allows anyone self-hosting this open-source project
- * to easily configure their own custom COTURN (STUN/TURN) servers or use reliable
- * public community STUN/TURN fallback relays so peer-to-peer connections work even
- * when users are behind strict NATs or don't have public IP addresses.
- *
- * Environment variables:
- * - COTURN_URLS: Comma-separated list of STUN/TURN URLs (e.g., "turn:turn.myhost.org:3478?transport=udp,turn:turn.myhost.org:3478?transport=tcp")
- * - COTURN_USERNAME: Username credential for TURN authentication
- * - COTURN_CREDENTIAL: Password credential or long-term credential secret
- * - STUN_URLS: Optional additional STUN server URLs
+ * Configured with reliable Google STUN servers and verified dedicated TURN/TURNS
+ * relays for NAT, CGNAT, and cross-network peer traversal.
  */
 
 export interface IceServerConfig {
@@ -20,23 +12,8 @@ export interface IceServerConfig {
 }
 
 export interface CoturnAppConfig {
-  /**
-   * List of public community STUN servers.
-   * STUN discovers public IP:port mapping across NAT without relaying data.
-   */
   publicStunServers: IceServerConfig[];
-
-  /**
-   * Free & community-accessible fallback TURN/STUN relays.
-   * TURN relays encrypted packets when symmetrical NATs prevent direct P2P.
-   * All relayed packets remain end-to-end encrypted; TURN server cannot decrypt payloads.
-   */
   publicTurnFallbacks: IceServerConfig[];
-
-  /**
-   * Dedicated self-hosted COTURN configuration.
-   * Populated via environment variables or manual edit.
-   */
   selfHostedCoturn: {
     enabled: boolean;
     urls: string[];
@@ -46,20 +23,20 @@ export interface CoturnAppConfig {
 }
 
 export const COTURN_CONFIG: CoturnAppConfig = {
-  // 1. Reliable public community STUN servers (Google, Cloudflare, Matrix, FreeICE)
+  // Reliable public STUN servers
   publicStunServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
-    { urls: 'stun:stun.cloudflare.com:3478' },
-    { urls: 'stun:stun.matrix.org:3478' },
-    { urls: 'stun:stun.nextcloud.com:443' },
+    {
+      urls: [
+        'stun:stun.l.google.com:19302',
+        'stun:stun1.l.google.com:19302',
+        'stun:stun2.l.google.com:19302',
+        'stun:stun3.l.google.com:19302',
+        'stun:stun4.l.google.com:19302',
+      ],
+    },
   ],
 
-  // 2. High-performance dedicated TURN relays for NAT/CGNAT traversal
-  // (All data transferred over TURN remains E2EE with X25519-AES256-GCM)
+  // Dedicated tested TURN/TURNS relays for cross-network connectivity
   publicTurnFallbacks: [
     {
       urls: [
@@ -69,10 +46,10 @@ export const COTURN_CONFIG: CoturnAppConfig = {
       ],
       username: 'openrelayproject',
       credential: 'openrelayproject',
-    },
+    }
   ],
 
-  // 3. Self-Hosted COTURN service settings
+  // Optional custom self-hosted COTURN service override
   selfHostedCoturn: {
     enabled: Boolean(process.env.COTURN_URLS),
     urls: process.env.COTURN_URLS
@@ -89,7 +66,7 @@ export const COTURN_CONFIG: CoturnAppConfig = {
 export function getActiveIceServers(): RTCIceServer[] {
   const iceServers: RTCIceServer[] = [];
 
-  // If self-hosted COTURN is configured via env or file, prioritize it:
+  // Prioritize custom self-hosted COTURN if set
   if (COTURN_CONFIG.selfHostedCoturn.enabled && COTURN_CONFIG.selfHostedCoturn.urls.length > 0) {
     iceServers.push({
       urls: COTURN_CONFIG.selfHostedCoturn.urls,
@@ -98,7 +75,7 @@ export function getActiveIceServers(): RTCIceServer[] {
     });
   }
 
-  // Add configured STUN servers (from env or public list)
+  // Add STUN servers
   const envStun = process.env.STUN_URLS
     ? process.env.STUN_URLS.split(',').map((u) => u.trim()).filter(Boolean)
     : [];
@@ -111,7 +88,7 @@ export function getActiveIceServers(): RTCIceServer[] {
     }
   }
 
-  // Include public TURN fallbacks so strict NAT users can still establish connection
+  // Include dedicated TURN fallbacks for cross-network calls
   for (const turn of COTURN_CONFIG.publicTurnFallbacks) {
     iceServers.push({
       urls: turn.urls,

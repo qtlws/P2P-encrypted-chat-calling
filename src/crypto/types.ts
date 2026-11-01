@@ -67,6 +67,8 @@ export interface WireMessage {
   ciphertext: string; // Base64 AES-256-GCM
   iv: string; // Base64 12-byte IV
   senderFingerprint: string;
+  senderIdentityPublicKey?: string;
+  senderEncryptionPublicKey?: string;
   signature: string; // Ed25519 signature of canonical payload
 }
 

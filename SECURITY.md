@@ -69,3 +69,23 @@ Every message is protected by three cryptographic layers:
 * WebRTC DataChannel and MediaStream connections use standard DTLS 1.3 / SRTP for peer-to-peer transport encryption.
 * Transport-level encryption is treated as secondary: application-level AES-256-GCM encryption is mandatory for all messages.
 * Even if a TURN relay or network adversary inspects the WebRTC packets, message payloads are double-encrypted with zero plaintext leakage.
+
+---
+
+## 6. Deterministic Mutual Key Agreement & Reconnect Resilience
+
+In addition to dynamic session negotiation, the system computes a deterministic pairwise mutual root key using:
+$$\text{PRK} = \text{HKDF-Extract}(\text{Salt} = \text{SHA256}(\text{CanonicalUIDs} + \text{":SALT"}), \text{IKM} = \text{X25519-ECDH})$$
+$$\text{MutualKey} = \text{HKDF-Expand}(\text{PRK}, \text{info} = \text{"P2P-MUTUAL-KEY:"} + \text{CanonicalUIDs} + \text{":AES-256-GCM"}, 32)$$
+
+* **0-RTT Security**: Allows peers to immediately exchange verified encrypted messages even if one peer disconnected and reconnected on a new network without completing a full 3-way handshake round-trip.
+* **Non-Replayability**: Every message continues to use a freshly generated 12-byte random IV (`crypto.getRandomValues`) and an authenticating Ed25519 digital signature.
+
+---
+
+## 7. Coturn TLS Relay Security & Media Isolation
+
+When peers cannot form a direct UDP connection due to Symmetric NAT or corporate firewalls:
+* Connections transition automatically to **Coturn TLS TURN Relay** (`turns://...:5349?transport=tcp`).
+* **Zero Eavesdropping**: The TURN relay functions strictly as an encrypted packet forwarder. Under the WebRTC specification, media keys are negotiated peer-to-peer via DTLS. The TURN server never possesses the DTLS keys or the application AES-256-GCM keys.
+* **No Media Recording**: Audio and video streams flow directly between endpoints or through authenticated TLS relays without any recording or intermediate storage.

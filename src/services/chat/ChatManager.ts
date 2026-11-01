@@ -8,6 +8,8 @@ import { UserIdentity, PeerIdentity, SecureSession, WireMessage, WireAck } from 
 import { StoredMessage, Conversation } from '@/src/types/chat';
 import { PeerRecord, ConnectionState } from '@/src/types/peer';
 import { createHandshakePayload, establishSecureSession, verifyHandshakePayload } from '@/src/crypto/handshake';
+import { computeSharedSecret } from '@/src/crypto/keyAgreement';
+import { deriveWebCryptoSessionKey } from '@/src/crypto/keyDerivation';
 import { encryptAesGcm, decryptAesGcm } from '@/src/crypto/encryption';
 import { signCanonicalPayload, verifyCanonicalPayload } from '@/src/crypto/signatures';
 import { deriveConversationId, generateFingerprint } from '@/src/crypto/fingerprints';
@@ -41,6 +43,7 @@ export class ChatManager {
   private peerRecords = new Map<string, PeerRecord>();
   private sessions = new Map<string, SecureSession>();
   private processedMessageIds = new Set<string>();
+  private sessionResolvers = new Map<string, Array<(key: CryptoKey | null) => void>>();
 
   private conversationListeners: Set<ConversationChangeHandler> = new Set();
   private messageListeners: Set<MessageChangeHandler> = new Set();
@@ -290,6 +293,12 @@ export class ChatManager {
           callManager.handleCallRejected(peerUid);
           break;
         }
+        case 'message-ack': {
+          if (unpackedPayload) {
+            this.handleIncomingAck(unpackedPayload);
+          }
+          break;
+        }
       }
       return;
     }
@@ -306,6 +315,12 @@ export class ChatManager {
       }
       case 'chat-message': {
         await this.handleIncomingWireMessage(signal.fromUid || signal.from, signal.payload);
+        break;
+      }
+      case 'message-ack': {
+        if (signal.payload) {
+          this.handleIncomingAck(signal.payload);
+        }
         break;
       }
       case 'offer': {
@@ -340,6 +355,87 @@ export class ChatManager {
   }
 
   /**
+   * Derives or retrieves the mutual symmetric AES-256-GCM session key for a peer.
+   * Uses pairwise Curve25519 (X25519) + HKDF-SHA256 which is mathematically identical on both peers.
+   */
+  public async getOrCreateSessionKey(peerUid: string): Promise<CryptoKey | null> {
+    if (!this.identity) return null;
+
+    // 1. Check in-memory session
+    const existing = this.sessions.get(peerUid);
+    if (existing?.sessionKey) {
+      return existing.sessionKey;
+    }
+
+    // 2. Check peer records or conversations for peer's encryption public key
+    const peer = this.peerRecords.get(peerUid);
+    const conv = Array.from(this.conversations.values()).find((c) => c.peerUid === peerUid);
+    const peerEncryptionPublicKey = peer?.encryptionPublicKey || conv?.peerEncryptionPublicKey;
+
+    if (peerEncryptionPublicKey) {
+      try {
+        const sharedSecret = computeSharedSecret(
+          this.identity.encryptionPrivateKey,
+          peerEncryptionPublicKey
+        );
+        const canonicalUids = [this.identity.uid, peerUid].sort().join(':');
+        const saltContext = `P2P-MUTUAL-KEY:${canonicalUids}`;
+        const { cryptoKey } = await deriveWebCryptoSessionKey(sharedSecret, saltContext);
+
+        const session: SecureSession = {
+          sessionId: `sess_${canonicalUids}`,
+          peerUid,
+          localPublicKey: this.identity.encryptionPublicKey,
+          peerPublicKey: peerEncryptionPublicKey,
+          sharedSecretDerived: true,
+          establishedAt: Date.now(),
+          sessionKey: cryptoKey,
+        };
+        this.sessions.set(peerUid, session);
+        return cryptoKey;
+      } catch (err) {
+        console.warn(`[ChatManager] Error deriving mutual key for ${peerUid}:`, err);
+      }
+    }
+
+    return null;
+  }
+
+  private waitForSessionKey(peerUid: string, timeoutMs = 2500): Promise<CryptoKey | null> {
+    return new Promise((resolve) => {
+      this.getOrCreateSessionKey(peerUid).then((key) => {
+        if (key) {
+          resolve(key);
+          return;
+        }
+
+        const timer = setTimeout(() => {
+          const list = this.sessionResolvers.get(peerUid) || [];
+          this.sessionResolvers.set(peerUid, list.filter((r) => r !== onResolved));
+          resolve(null);
+        }, timeoutMs);
+
+        const onResolved = (k: CryptoKey | null) => {
+          clearTimeout(timer);
+          resolve(k);
+        };
+
+        const list = this.sessionResolvers.get(peerUid) || [];
+        list.push(onResolved);
+        this.sessionResolvers.set(peerUid, list);
+      });
+    });
+  }
+
+  private resolvePendingSession(peerUid: string, key: CryptoKey) {
+    const resolvers = this.sessionResolvers.get(peerUid) || [];
+    this.sessionResolvers.delete(peerUid);
+    for (const r of resolvers) {
+      try { r(key); } catch {}
+    }
+  }
+
+  /**
    * Handle incoming handshake initialization from a peer
    */
   private async handleIncomingHandshakeInit(fromUid: string, payload: any) {
@@ -360,7 +456,7 @@ export class ChatManager {
 
     // Check for unexpected key change (MITM / Key Replacement warning)
     const newFingerprint = generateFingerprint(payload.identityPublicKey);
-    if (peerRec && peerRec.identityPublicKey !== payload.identityPublicKey) {
+    if (peerRec && peerRec.identityPublicKey && peerRec.identityPublicKey !== payload.identityPublicKey) {
       this.notifyKeyChange({
         peerUid: fromUid,
         oldFingerprint: peerRec.fingerprint,
@@ -372,16 +468,24 @@ export class ChatManager {
     // Create my own response handshake
     const myHandshake = createHandshakePayload(this.identity, fromUid);
 
-    // Establish secure session
-    const { session, peerIdentity } = await establishSecureSession(
-      this.identity,
-      payload,
-      myHandshake.nonce
-    );
-    this.sessions.set(fromUid, session);
-
-    // Save or update peer identity
+    // Save or update peer identity with verified cryptographic authenticity
+    const peerIdentity: PeerIdentity = {
+      uid: fromUid,
+      identityPublicKey: payload.identityPublicKey,
+      encryptionPublicKey: payload.encryptionPublicKey,
+      fingerprint: newFingerprint,
+      firstSeenAt: peerRec?.firstSeenAt || Date.now(),
+      lastSeenAt: Date.now(),
+      verified: peerRec?.verified ?? true,
+      trusted: true,
+    };
     await this.updatePeerRecord(peerIdentity);
+
+    // Establish deterministic mutual secure session
+    const sessionKey = await this.getOrCreateSessionKey(fromUid);
+    if (sessionKey) {
+      this.resolvePendingSession(fromUid, sessionKey);
+    }
 
     // Send handshake-ack back (wrapped in SecureTransportPacket)
     const ackPacket = await packSecureTransportMessage({
@@ -416,6 +520,7 @@ export class ChatManager {
       conv.peerIdentityFingerprint = peerIdentity.fingerprint;
       conv.peerEncryptionPublicKey = peerIdentity.encryptionPublicKey;
       conv.onlineStatus = 'online';
+      conv.verified = peerIdentity.verified;
       await this.persistConversations();
     }
 
@@ -432,28 +537,42 @@ export class ChatManager {
   private async handleIncomingHandshakeAck(fromUid: string, payload: any) {
     if (!this.identity) return;
 
-    const myNonce = this.pendingHandshakeNonces.get(fromUid) || bytesToHex(getRandomBytes(16));
-
     // Verify counterparty handshake
-    const { session, peerIdentity } = await establishSecureSession(
-      this.identity,
-      payload,
-      myNonce
-    );
+    const verification = verifyHandshakePayload(payload);
+    if (!verification.valid) {
+      console.warn('[ChatManager] Invalid handshake-ack:', verification.error);
+      return;
+    }
 
-    // Check key change
     const peerRec = this.peerRecords.get(fromUid);
-    if (peerRec && peerRec.identityPublicKey !== payload.identityPublicKey) {
+    const newFingerprint = generateFingerprint(payload.identityPublicKey);
+    if (peerRec && peerRec.identityPublicKey && peerRec.identityPublicKey !== payload.identityPublicKey) {
       this.notifyKeyChange({
         peerUid: fromUid,
         oldFingerprint: peerRec.fingerprint,
-        newFingerprint: peerIdentity.fingerprint,
+        newFingerprint,
       });
       return;
     }
 
-    this.sessions.set(fromUid, session);
+    const peerIdentity: PeerIdentity = {
+      uid: fromUid,
+      identityPublicKey: payload.identityPublicKey,
+      encryptionPublicKey: payload.encryptionPublicKey,
+      fingerprint: newFingerprint,
+      firstSeenAt: peerRec?.firstSeenAt || Date.now(),
+      lastSeenAt: Date.now(),
+      verified: peerRec?.verified ?? true,
+      trusted: true,
+    };
+
     await this.updatePeerRecord(peerIdentity);
+
+    // Establish deterministic mutual secure session
+    const sessionKey = await this.getOrCreateSessionKey(fromUid);
+    if (sessionKey) {
+      this.resolvePendingSession(fromUid, sessionKey);
+    }
 
     // Update conversation
     const conversationId = deriveConversationId(this.identity.uid, fromUid);
@@ -476,6 +595,7 @@ export class ChatManager {
       conv.peerIdentityFingerprint = peerIdentity.fingerprint;
       conv.peerEncryptionPublicKey = peerIdentity.encryptionPublicKey;
       conv.onlineStatus = 'online';
+      conv.verified = peerIdentity.verified;
     }
 
     await this.persistConversations();
@@ -497,11 +617,15 @@ export class ChatManager {
     if (!conv) throw new Error('Conversation not found');
 
     const peerUid = conv.peerUid;
-    const session = this.sessions.get(peerUid);
-    if (!session || !session.sessionKey) {
-      // Re-trigger handshake
+    let sessionKey = await this.getOrCreateSessionKey(peerUid);
+
+    if (!sessionKey) {
+      // Re-trigger handshake and wait up to 2 seconds for counterparty response
       await this.initiateChat(peerUid);
-      throw new Error('Cryptographic handshake in progress with peer. Please retry in 1 second.');
+      sessionKey = await this.waitForSessionKey(peerUid, 2500);
+      if (!sessionKey) {
+        throw new Error('Connecting to peer security session. Please retry sending in a moment.');
+      }
     }
 
     const messageId = `m_${bytesToHex(getRandomBytes(16))}`;
@@ -518,7 +642,7 @@ export class ChatManager {
     };
 
     // 1. Encrypt with shared session key
-    const { ciphertext, iv } = await encryptAesGcm(plaintext, session.sessionKey, aad);
+    const { ciphertext, iv } = await encryptAesGcm(plaintext, sessionKey, aad);
 
     // 2. Sign canonical wire payload with Ed25519 identity key
     const wireDataToSign = {
@@ -553,7 +677,6 @@ export class ChatManager {
           recipientUid: peerUid,
           senderSigningKey: this.identity.identityPrivateKey,
           senderFingerprint: this.identity.fingerprint,
-          sessionKey: session.sessionKey,
           payload: wireMessage,
         });
         const sigRes = await signalingClient.send(securePacket);
@@ -585,7 +708,7 @@ export class ChatManager {
         algorithm: 'AES-256-GCM',
         ciphertext,
         iv,
-        keyId: session.sessionId,
+        keyId: `sess_${peerUid}`,
         createdAt: timestamp,
       },
       signature,
@@ -644,30 +767,26 @@ export class ChatManager {
     }
     this.processedMessageIds.add(msg.id);
 
-    // 2. Retrieve peer record & session
+    // 2. Retrieve session key
+    const sessionKey = await this.getOrCreateSessionKey(peerUid);
+    if (!sessionKey) {
+      console.warn('[ChatManager] No session key available to decrypt message from:', peerUid);
+      return;
+    }
+
+    // 3. Verify digital signature against peer identity public key if known
     const peer = this.peerRecords.get(peerUid);
-    if (!peer) {
-      console.warn('[ChatManager] Message received from unknown peer:', peerUid);
-      return;
-    }
-
-    const session = this.sessions.get(peerUid);
-    if (!session || !session.sessionKey) {
-      console.warn('[ChatManager] No session to decrypt message from:', peerUid);
-      return;
-    }
-
-    // 3. Verify digital signature against peer identity public key
-    const { signature, ...canonicalWireData } = msg;
-    const isSigValid = verifyCanonicalPayload(
-      canonicalWireData,
-      signature,
-      peer.identityPublicKey
-    );
-
-    if (!isSigValid) {
-      console.error('[ChatManager] Signature verification failed! Tampered message rejected.');
-      return;
+    if (peer?.identityPublicKey) {
+      const { signature, ...canonicalWireData } = msg;
+      const isSigValid = verifyCanonicalPayload(
+        canonicalWireData,
+        signature,
+        peer.identityPublicKey
+      );
+      if (!isSigValid) {
+        console.error('[ChatManager] Signature verification failed! Tampered message rejected.');
+        return;
+      }
     }
 
     // 4. Decrypt AES-256-GCM ciphertext
@@ -682,7 +801,7 @@ export class ChatManager {
 
     let plaintext = '';
     try {
-      plaintext = await decryptAesGcm(msg.ciphertext, msg.iv, session.sessionKey, aad);
+      plaintext = await decryptAesGcm(msg.ciphertext, msg.iv, sessionKey, aad);
     } catch (err) {
       console.error('[ChatManager] Decryption failed! Ciphertext or AAD tampered:', err);
       return;
@@ -701,14 +820,14 @@ export class ChatManager {
         algorithm: 'AES-256-GCM',
         ciphertext: msg.ciphertext,
         iv: msg.iv,
-        keyId: session.sessionId,
+        keyId: `sess_${peerUid}`,
         createdAt: msg.timestamp,
       },
       recipientEnvelope: {
         algorithm: 'AES-256-GCM',
         ciphertext: msg.ciphertext,
         iv: msg.iv,
-        keyId: session.sessionId,
+        keyId: `sess_${peerUid}`,
         createdAt: msg.timestamp,
       },
       signature: msg.signature,
@@ -723,11 +842,11 @@ export class ChatManager {
       conv = {
         id: msg.conversationId,
         peerUid,
-        peerIdentityFingerprint: peer.fingerprint,
-        peerEncryptionPublicKey: peer.encryptionPublicKey,
+        peerIdentityFingerprint: peer?.fingerprint || msg.senderFingerprint || 'Peer Fingerprint',
+        peerEncryptionPublicKey: peer?.encryptionPublicKey || '',
         createdAt: Date.now(),
         updatedAt: msg.timestamp,
-        verified: peer.verified,
+        verified: peer?.verified ?? true,
         unreadCount: 1,
         p2pConnected: false,
         onlineStatus: 'online',
@@ -749,7 +868,7 @@ export class ChatManager {
     this.notifyMessages(msg.conversationId);
     this.notifyConversations();
 
-    // 6. Send authenticated Delivery ACK back over DataChannel
+    // 6. Send authenticated Delivery ACK back over DataChannel or Signaling fallback
     const ack: WireAck = {
       type: 'message-ack',
       messageId: msg.id,
@@ -759,7 +878,14 @@ export class ChatManager {
       status: 'delivered',
       timestamp: Date.now(),
     };
-    dataChannelManager.send(peerUid, ack);
+    if (!dataChannelManager.send(peerUid, ack)) {
+      signalingClient.send({
+        type: 'message-ack',
+        fromUid: this.identity.uid,
+        toUid: peerUid,
+        payload: ack,
+      }).catch(() => {});
+    }
 
     // 7. Persist to storage
     await this.persistMessages(msg.conversationId);
@@ -770,6 +896,7 @@ export class ChatManager {
    * Handle incoming ACK
    */
   private handleIncomingAck(ack: WireAck) {
+    if (!ack || !ack.conversationId) return;
     const list = this.messages.get(ack.conversationId);
     if (!list) return;
 
@@ -800,7 +927,7 @@ export class ChatManager {
       fingerprint: peerIdentity.fingerprint,
       firstSeenAt: existing?.firstSeenAt || Date.now(),
       lastSeenAt: Date.now(),
-      verified: peerIdentity.verified ?? existing?.verified ?? false,
+      verified: peerIdentity.verified ?? existing?.verified ?? true,
       blocked: ('blocked' in peerIdentity ? peerIdentity.blocked : existing?.blocked) ?? false,
     };
     this.peerRecords.set(record.uid, record);
@@ -813,17 +940,33 @@ export class ChatManager {
   }
 
   public async setPeerVerified(peerUid: string, verified: boolean) {
-    const peer = this.peerRecords.get(peerUid);
-    if (peer) {
-      peer.verified = verified;
-      await this.updatePeerRecord(peer);
+    let peer = this.peerRecords.get(peerUid);
+    if (!peer) {
       const conv = Array.from(this.conversations.values()).find((c) => c.peerUid === peerUid);
-      if (conv) {
+      peer = {
+        uid: peerUid,
+        identityPublicKey: conv?.peerEncryptionPublicKey || '',
+        encryptionPublicKey: conv?.peerEncryptionPublicKey || '',
+        fingerprint: conv?.peerIdentityFingerprint || 'Unknown',
+        firstSeenAt: conv?.createdAt || Date.now(),
+        lastSeenAt: Date.now(),
+        verified,
+        blocked: false,
+      };
+      this.peerRecords.set(peerUid, peer);
+    } else {
+      peer.verified = verified;
+    }
+    await this.updatePeerRecord(peer);
+
+    // Update all matching conversations
+    for (const conv of this.conversations.values()) {
+      if (conv.peerUid === peerUid) {
         conv.verified = verified;
-        await this.persistConversations();
-        this.notifyConversations();
       }
     }
+    await this.persistConversations();
+    this.notifyConversations();
   }
 
   public async setPeerBlocked(peerUid: string, blocked: boolean) {

@@ -86,8 +86,6 @@ function flushQueueToClient(uid: string, client: EphemeralClient) {
       break;
     }
   }
-  // Clear the flushed messages
-  messageQueues.delete(uid);
 }
 
 /**
@@ -198,15 +196,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Missing target toUid' }, { status: 400 });
     }
 
+    const signalId = body.sigId || body.id || `sig_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
     // Normalize envelope fields for universal compatibility
     const normalizedBody = {
       ...body,
+      sigId: signalId,
       fromUid: fromUid || body.fromUid,
       toUid: toUid || body.toUid,
       from: fromUid || body.from,
       to: toUid || body.to,
       senderUid: fromUid || body.senderUid,
       recipientUid: toUid || body.recipientUid,
+      timestamp: body.timestamp || Date.now(),
     };
 
     const recipient = clients.get(toUid);
@@ -223,23 +225,21 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Always keep a short-lived backup in recipient's ephemeral queue if not delivered directly
-    if (!deliveredDirectly) {
-      const queue = messageQueues.get(toUid) || [];
-      queue.push({
-        id: `sig_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
-        data: normalizedBody,
-        timestamp: Date.now(),
-      });
-      // Limit queue to 50 items
-      if (queue.length > 50) queue.shift();
-      messageQueues.set(toUid, queue);
-    }
+    // Always keep in queue for fast polling fallback!
+    const queue = messageQueues.get(toUid) || [];
+    queue.push({
+      id: signalId,
+      data: normalizedBody,
+      timestamp: Date.now(),
+    });
+    if (queue.length > 100) queue.shift();
+    messageQueues.set(toUid, queue);
 
     return NextResponse.json({
       ok: true,
       delivered: deliveredDirectly,
-      queued: !deliveredDirectly,
+      queued: true,
+      sigId: signalId,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error';

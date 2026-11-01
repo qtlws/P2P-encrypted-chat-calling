@@ -1,7 +1,7 @@
 /**
  * SignalingClient
  * Connects to ephemeral SSE stream and dispatches signaling envelopes via HTTP POST
- * Includes automatic keepalive, seamless reconnection, and queue polling fallback.
+ * Includes automatic keepalive, seamless reconnection, deduplication, and active fast polling fallback.
  */
 
 import { SignalMessage } from '@/src/types/signaling';
@@ -19,10 +19,10 @@ export class SignalingClient {
   private isConnected = false;
   private isConnecting = false;
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+  private processedSignalIds: Set<string> = new Set();
 
   constructor() {
     if (typeof window !== 'undefined') {
-      // Re-connect / check signaling when tab becomes visible
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible' && this.uid) {
           this.pollPendingMessages();
@@ -61,6 +61,10 @@ export class SignalingClient {
       this.reconnectTimeout = null;
     }
 
+    // Always start fast polling immediately so message signals are never dropped
+    this.startFastPolling();
+    this.pollPendingMessages();
+
     try {
       if (this.eventSource) {
         this.eventSource.close();
@@ -75,15 +79,23 @@ export class SignalingClient {
         this.isConnecting = false;
         this.notifyState(true);
         this.startHeartbeat();
-        // Immediately poll queue just in case
         this.pollPendingMessages();
       };
 
       this.eventSource.onmessage = (event) => {
         if (!event.data) return;
         try {
-          const data = JSON.parse(event.data) as SignalMessage;
+          const data = JSON.parse(event.data) as SignalMessage & { sigId?: string; id?: string };
           if (data.type === 'ping' || data.type === 'connected') return;
+
+          const signalId = data.sigId || data.id;
+          if (signalId && this.processedSignalIds.has(signalId)) {
+            return; // Deduplicate
+          }
+          if (signalId) {
+            this.markProcessed(signalId);
+          }
+
           this.notifyListeners(data);
         } catch (e) {
           console.warn('[SignalingClient] Parse error on SSE payload:', e);
@@ -100,7 +112,8 @@ export class SignalingClient {
           this.eventSource = null;
         }
 
-        // Schedule proactive reconnect in 2 seconds
+        // Fast polling continues pulling messages in background.
+        // Schedule proactive SSE reconnect in 2 seconds
         if (!this.reconnectTimeout) {
           this.reconnectTimeout = setTimeout(() => {
             this.reconnectTimeout = null;
@@ -118,8 +131,18 @@ export class SignalingClient {
     }
   }
 
+  private markProcessed(id: string) {
+    this.processedSignalIds.add(id);
+    if (this.processedSignalIds.size > 1000) {
+      const arr = Array.from(this.processedSignalIds);
+      for (let i = 0; i < 300; i++) {
+        this.processedSignalIds.delete(arr[i]);
+      }
+    }
+  }
+
   /**
-   * Fast polling fallback to pull any queued messages
+   * Fast polling fallback to pull any queued messages (< 1.5s interval)
    */
   public async pollPendingMessages() {
     if (!this.uid) return;
@@ -129,6 +152,13 @@ export class SignalingClient {
         const data = await res.json();
         if (data.ok && Array.isArray(data.messages)) {
           for (const msg of data.messages) {
+            const signalId = msg.sigId || msg.id;
+            if (signalId && this.processedSignalIds.has(signalId)) {
+              continue; // Deduplicate
+            }
+            if (signalId) {
+              this.markProcessed(signalId);
+            }
             this.notifyListeners(msg);
           }
         }
@@ -140,6 +170,7 @@ export class SignalingClient {
 
   public disconnect() {
     this.stopHeartbeat();
+    this.stopFastPolling();
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = null;
@@ -153,12 +184,18 @@ export class SignalingClient {
     this.notifyState(false);
   }
 
-  public async send(message: SignalMessage | Record<string, any>): Promise<{ ok: boolean; error?: string; delivered?: boolean; queued?: boolean }> {
+  public async send(message: SignalMessage | Record<string, any>): Promise<{ ok: boolean; error?: string; delivered?: boolean; queued?: boolean; sigId?: string }> {
+    const sigId = (message as any).sigId || (message as any).id || `sig_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    const payload = {
+      ...message,
+      sigId,
+      id: sigId,
+    };
     try {
       const res = await fetch('/api/signaling', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(message),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       return data;
@@ -202,15 +239,30 @@ export class SignalingClient {
     }
   }
 
+  private startFastPolling() {
+    this.stopFastPolling();
+    // Fast poll every 1200ms to guarantee zero dropped signaling envelopes
+    this.pollTimer = setInterval(() => {
+      if (this.uid) {
+        this.pollPendingMessages().catch(() => {});
+      }
+    }, 1200);
+  }
+
+  private stopFastPolling() {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+  }
+
   private startHeartbeat() {
     this.stopHeartbeat();
-    // Heartbeat every 15s + fallback poll check
     this.heartbeatTimer = setInterval(() => {
       if (this.uid && this.isConnected) {
         this.send({ type: 'presence', uid: this.uid }).catch(() => {});
-        this.pollPendingMessages().catch(() => {});
       }
-    }, 15000);
+    }, 12000);
   }
 
   private stopHeartbeat() {

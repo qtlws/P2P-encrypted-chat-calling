@@ -150,13 +150,12 @@ export async function unpackSecureTransportMessage(params: {
     return { valid: false, data: null, payload: null, error: 'Packet timestamp out of replay bounds' };
   }
 
-  // If this is an unencrypted handshake message (e.g. handshake-init or handshake-ack),
-  // and we don't yet have the peer's public key registered, derive it from the inner payload
-  if (!senderPublicKey && !packet.encrypted && typeof packet.payload === 'string') {
+  // If we don't yet have the peer's public key registered, derive it from the inner payload if unencrypted
+  if (!senderPublicKey && !packet.encrypted) {
     try {
-      const parsed = JSON.parse(packet.payload);
-      if (parsed && typeof parsed.identityPublicKey === 'string') {
-        senderPublicKey = parsed.identityPublicKey;
+      const parsed = typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload;
+      if (parsed) {
+        senderPublicKey = parsed.identityPublicKey || parsed.senderIdentityPublicKey || parsed.senderPublicKey;
       }
     } catch {
       // Ignored

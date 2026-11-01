@@ -1,0 +1,1056 @@
+
+
+========================================
+FILE: client\AGENTS.md
+========================================
+<!-- BEGIN:nextjs-agent-rules -->
+
+## This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->
+
+
+========================================
+FILE: client\eslint.config.mjs
+========================================
+import { defineConfig, globalIgnores } from "eslint/config";
+import nextVitals from "eslint-config-next/core-web-vitals";
+
+const eslintConfig = defineConfig([
+  ...nextVitals,
+  // Override default ignores of eslint-config-next.
+  globalIgnores([
+    // Default ignores of eslint-config-next:
+    ".next/**",
+    "out/**",
+    "build/**",
+    "next-env.d.ts",
+  ]),
+]);
+
+export default eslintConfig;
+
+
+========================================
+FILE: client\jsconfig.json
+========================================
+{
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  }
+}
+
+
+========================================
+FILE: client\next.config.mjs
+========================================
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  /* config options here */
+  // Permit the development server's HMR requests when this app is opened
+  // from another device on the local network.
+  allowedDevOrigins: ["192.168.1.24","https://9l4v5lkn-5000.inc1.devtunnels.ms/"],
+  cacheComponents: true,
+  partialPrefetching: true,
+  reactCompiler: true,
+  turbopack: {
+    rules: {
+      "*.css": {
+        loaders: ["@tailwindcss/turbopack"],
+        as: "*.css",
+      },
+    },
+  },
+};
+
+export default nextConfig;
+
+
+========================================
+FILE: client\package.json
+========================================
+{
+  "name": "client",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "next": "16.4.3",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "socket.io-client": "^4.8.4"
+  },
+  "devDependencies": {
+    "@tailwindcss/turbopack": "^4",
+    "babel-plugin-react-compiler": "1.0.0",
+    "eslint": "^9",
+    "eslint-config-next": "16.4.3",
+    "tailwindcss": "^4"
+  }
+}
+
+
+========================================
+FILE: client\README.md
+========================================
+This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app).
+
+## Getting Started
+
+First, run the development server:
+
+```bash
+npm run dev
+# or
+yarn dev
+# or
+pnpm dev
+# or
+bun dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+
+You can start editing the page by modifying `app/page.js`. The page auto-updates as you edit the file.
+
+This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+
+## Learn More
+
+To learn more about Next.js, take a look at the following resources:
+
+- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
+- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+
+You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+
+## Deploy on Vercel
+
+The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+
+Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+
+========================================
+FILE: client\src\app\globals.css
+========================================
+@import "tailwindcss";
+
+:root {
+  --bg-deep: #0c1210;
+  --bg-panel: #14201b;
+  --bg-elevated: #1c2c25;
+  --line: rgba(180, 220, 190, 0.14);
+  --text: #e8f2ea;
+  --muted: #8fa896;
+  --accent: #3ecf8e;
+  --accent-strong: #2aa86f;
+  --danger: #e85d5d;
+  --danger-strong: #c94444;
+  --shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+@theme inline {
+  --color-background: var(--bg-deep);
+  --color-foreground: var(--text);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(62, 207, 142, 0.18), transparent 55%),
+    radial-gradient(900px 500px at 100% 0%, rgba(56, 130, 110, 0.22), transparent 50%),
+    linear-gradient(160deg, #0a100e 0%, #101a16 45%, #0c1210 100%);
+  color: var(--text);
+  font-family: var(--font-sans), system-ui, sans-serif;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.call-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 1.25rem clamp(1rem, 3vw, 2rem) 2rem;
+  gap: 1.5rem;
+}
+
+.call-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.brand {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+
+.status-line {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.room-chip {
+  margin: 0;
+  padding: 0.45rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-family: var(--font-mono), monospace;
+  font-size: 0.8rem;
+  background: rgba(20, 32, 27, 0.7);
+}
+
+.join-panel {
+  margin: auto;
+  width: min(100%, 420px);
+  padding: 2rem;
+  border: 1px solid var(--line);
+  border-radius: 1.25rem;
+  background: color-mix(in srgb, var(--bg-panel) 88%, transparent);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(10px);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.join-panel h1 {
+  margin: 0;
+  font-size: clamp(1.6rem, 4vw, 2rem);
+  letter-spacing: -0.04em;
+  line-height: 1.15;
+}
+
+.join-copy {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.55;
+  font-size: 0.95rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.field span {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.field input {
+  width: 100%;
+  padding: 0.85rem 1rem;
+  border-radius: 0.75rem;
+  border: 1px solid var(--line);
+  background: var(--bg-elevated);
+  color: var(--text);
+  outline: none;
+}
+
+.field input:focus {
+  border-color: color-mix(in srgb, var(--accent) 65%, transparent);
+  box-shadow: 0 0 0 3px rgba(62, 207, 142, 0.15);
+}
+
+.primary-btn {
+  margin-top: 0.25rem;
+  border: none;
+  border-radius: 0.85rem;
+  padding: 0.9rem 1rem;
+  background: linear-gradient(180deg, var(--accent), var(--accent-strong));
+  color: #04140d;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 120ms ease, filter 120ms ease;
+}
+
+.primary-btn:hover {
+  filter: brightness(1.05);
+  transform: translateY(-1px);
+}
+
+.primary-btn:active {
+  transform: translateY(0);
+}
+
+.error {
+  margin: 0;
+  color: #ffb4b4;
+  font-size: 0.88rem;
+  line-height: 1.4;
+}
+
+.error.center {
+  text-align: center;
+}
+
+.stage {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-height: 0;
+}
+
+.video-grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.85rem;
+  min-height: 0;
+}
+
+@media (min-width: 900px) {
+  .video-grid {
+    grid-template-columns: 2.2fr 1fr;
+    align-items: stretch;
+  }
+}
+
+.video-tile {
+  position: relative;
+  overflow: hidden;
+  border-radius: 1.1rem;
+  border: 1px solid var(--line);
+  background: #070b09;
+  min-height: 240px;
+  box-shadow: var(--shadow);
+}
+
+.video-tile.remote {
+  min-height: min(58vh, 620px);
+}
+
+.video-tile.local {
+  min-height: 220px;
+}
+
+.video-tile video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  background: #070b09;
+}
+
+.video-tile.local video {
+  transform: scaleX(-1);
+}
+
+.tile-label {
+  position: absolute;
+  left: 0.75rem;
+  bottom: 0.75rem;
+  padding: 0.3rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  font-size: 0.75rem;
+  color: #d9ebe0;
+}
+
+.placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 0.95rem;
+  pointer-events: none;
+  background: radial-gradient(circle at center, rgba(28, 44, 37, 0.55), transparent 70%);
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.65rem;
+  padding-bottom: 0.5rem;
+}
+
+.control-btn {
+  min-width: 7.5rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.75rem 1.1rem;
+  background: rgba(20, 32, 27, 0.9);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.control-btn:hover {
+  background: var(--bg-elevated);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.control-btn.danger {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  color: #ffd4d4;
+}
+
+.control-btn.danger:hover {
+  background: color-mix(in srgb, var(--danger-strong) 35%, transparent);
+}
+
+
+========================================
+FILE: client\src\app\layout.js
+========================================
+import { Space_Grotesk, IBM_Plex_Mono } from "next/font/google";
+import "./globals.css";
+
+const spaceGrotesk = Space_Grotesk({
+  variable: "--font-sans",
+  subsets: ["latin"],
+});
+
+const ibmPlexMono = IBM_Plex_Mono({
+  variable: "--font-mono",
+  subsets: ["latin"],
+  weight: ["400", "500"],
+});
+
+export const metadata = {
+  title: "PeerLink — Video Call",
+  description: "Simple 1:1 video calling with WebRTC and Socket.IO",
+};
+
+export default function RootLayout({ children }) {
+  return (
+    <html
+      lang="en"
+      className={`${spaceGrotesk.variable} ${ibmPlexMono.variable} h-full antialiased`}
+    >
+      <body className="min-h-full flex flex-col">{children}</body>
+    </html>
+  );
+}
+
+
+========================================
+FILE: client\src\app\page.js
+========================================
+import VideoCall from "../components/VideoCall";
+
+export default function Home() {
+  return <VideoCall />;
+}
+
+
+========================================
+FILE: client\src\components\VideoCall.js
+========================================
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { io } from "socket.io-client";
+
+const SIGNALING_URL =
+  process.env.NEXT_PUBLIC_SIGNALING_URL || "http://localhost:5000";
+
+const ICE_SERVERS = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    {
+      urls: [
+        "turns:newturn.jaatakastro.com:5349",
+        "turn:newturn.jaatakastro.com:3478"
+      ],
+      username: "jaatakastro",
+      credential: "c43835777e84edb80115bef52e8364d82bc0e39c4e18d1c36c0d4cd72c69a66c"
+    }
+  ],
+};
+
+export default function VideoCall() {
+  const [roomId, setRoomId] = useState("");
+  const [status, setStatus] = useState("idle");
+  const [error, setError] = useState("");
+  const [muted, setMuted] = useState(false);
+  const [cameraOff, setCameraOff] = useState(false);
+
+  const localVideoRef = useRef(null);
+  const remoteVideoRef = useRef(null);
+  const socketRef = useRef(null);
+  const pcRef = useRef(null);
+  const localStreamRef = useRef(null);
+  const remotePeerIdRef = useRef(null);
+  const makingOfferRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      cleanup();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function getLocalStream() {
+    if (localStreamRef.current) return localStreamRef.current;
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: true,
+    });
+
+    localStreamRef.current = stream;
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = stream;
+    }
+    return stream;
+  }
+
+  function createPeerConnection(peerId) {
+    if (pcRef.current) {
+      pcRef.current.close();
+    }
+
+    const pc = new RTCPeerConnection(ICE_SERVERS);
+    pcRef.current = pc;
+    remotePeerIdRef.current = peerId;
+
+    const localStream = localStreamRef.current;
+    if (localStream) {
+      localStream.getTracks().forEach((track) => {
+        pc.addTrack(track, localStream);
+      });
+    }
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate && socketRef.current && remotePeerIdRef.current) {
+        socketRef.current.emit("ice-candidate", {
+          to: remotePeerIdRef.current,
+          candidate: event.candidate,
+        });
+      }
+    };
+
+    pc.ontrack = (event) => {
+      const [stream] = event.streams;
+      if (remoteVideoRef.current && stream) {
+        remoteVideoRef.current.srcObject = stream;
+      }
+      setStatus("connected");
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "connected") {
+        setStatus("connected");
+      } else if (
+        pc.connectionState === "failed" ||
+        pc.connectionState === "disconnected" ||
+        pc.connectionState === "closed"
+      ) {
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = null;
+        }
+        if (status !== "idle") {
+          setStatus((prev) => (prev === "idle" ? prev : "waiting"));
+        }
+      }
+    };
+
+    return pc;
+  }
+
+  async function startCallAsOfferer(peerId) {
+    const pc = createPeerConnection(peerId);
+    makingOfferRef.current = true;
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socketRef.current.emit("offer", {
+        to: peerId,
+        sdp: pc.localDescription,
+      });
+    } finally {
+      makingOfferRef.current = false;
+    }
+  }
+
+  async function handleOffer({ from, sdp }) {
+    const pc = createPeerConnection(from);
+    await pc.setRemoteDescription(sdp);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    socketRef.current.emit("answer", {
+      to: from,
+      sdp: pc.localDescription,
+    });
+    setStatus("connecting");
+  }
+
+  async function handleAnswer({ sdp }) {
+    const pc = pcRef.current;
+    if (!pc) return;
+    await pc.setRemoteDescription(sdp);
+    setStatus("connecting");
+  }
+
+  async function handleIceCandidate({ candidate }) {
+    const pc = pcRef.current;
+    if (!pc || !candidate) return;
+    try {
+      await pc.addIceCandidate(candidate);
+    } catch (err) {
+      if (!makingOfferRef.current) {
+        console.error("Failed to add ICE candidate", err);
+      }
+    }
+  }
+
+  function attachSocketListeners(socket) {
+    socket.on("joined-room", async ({ peers }) => {
+      setError("");
+      // New joiner creates the offer when someone is already in the room.
+      if (peers.length === 0) {
+        setStatus("waiting");
+        return;
+      }
+      setStatus("connecting");
+      await startCallAsOfferer(peers[0]);
+    });
+
+    socket.on("peer-joined", () => {
+      // Existing peer waits for the new joiner's offer.
+      setStatus("connecting");
+    });
+
+    socket.on("offer", handleOffer);
+    socket.on("answer", handleAnswer);
+    socket.on("ice-candidate", handleIceCandidate);
+
+    socket.on("peer-left", () => {
+      if (pcRef.current) {
+        pcRef.current.close();
+        pcRef.current = null;
+      }
+      remotePeerIdRef.current = null;
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = null;
+      }
+      setStatus("waiting");
+    });
+
+    socket.on("room-full", () => {
+      setError("This room already has 2 people. Try another room ID.");
+      setStatus("idle");
+      cleanupMediaOnly();
+    });
+
+    socket.on("error-message", ({ message }) => {
+      setError(message || "Something went wrong.");
+    });
+
+    socket.on("connect_error", () => {
+      setError("Could not reach the signaling server. Is it running on port 5000?");
+      setStatus("idle");
+    });
+  }
+
+  async function joinRoom(event) {
+    event.preventDefault();
+    setError("");
+
+    const trimmed = roomId.trim();
+    if (!trimmed) {
+      setError("Enter a room ID to join.");
+      return;
+    }
+
+    try {
+      setStatus("joining");
+      await getLocalStream();
+
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+      }
+
+      const socket = io(SIGNALING_URL, {
+        transports: ["websocket", "polling"],
+      });
+      socketRef.current = socket;
+      attachSocketListeners(socket);
+
+      socket.emit("join-room", { roomId: trimmed });
+    } catch (err) {
+      console.error(err);
+      setError(
+        "Camera/microphone permission is required. Check browser settings and try again."
+      );
+      setStatus("idle");
+    }
+  }
+
+  function cleanupMediaOnly() {
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => track.stop());
+      localStreamRef.current = null;
+    }
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = null;
+    }
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = null;
+    }
+  }
+
+  function cleanup() {
+    if (socketRef.current) {
+      socketRef.current.emit("leave-room");
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+    if (pcRef.current) {
+      pcRef.current.close();
+      pcRef.current = null;
+    }
+    remotePeerIdRef.current = null;
+    cleanupMediaOnly();
+  }
+
+  function leaveRoom() {
+    cleanup();
+    setMuted(false);
+    setCameraOff(false);
+    setStatus("idle");
+    setError("");
+  }
+
+  function toggleMute() {
+    const stream = localStreamRef.current;
+    if (!stream) return;
+    stream.getAudioTracks().forEach((track) => {
+      track.enabled = muted;
+    });
+    setMuted((prev) => !prev);
+  }
+
+  function toggleCamera() {
+    const stream = localStreamRef.current;
+    if (!stream) return;
+    stream.getVideoTracks().forEach((track) => {
+      track.enabled = cameraOff;
+    });
+    setCameraOff((prev) => !prev);
+  }
+
+  const inCall = status !== "idle";
+
+  const statusLabel = {
+    idle: "Ready to join",
+    joining: "Joining room…",
+    waiting: "Waiting for someone to join…",
+    connecting: "Connecting…",
+    connected: "Connected",
+  }[status];
+
+  return (
+    <div className="call-shell">
+      <header className="call-header">
+        <div>
+          <p className="brand">PeerLink</p>
+          <p className="status-line">{statusLabel}</p>
+        </div>
+        {inCall && roomId.trim() ? (
+          <p className="room-chip">Room · {roomId.trim()}</p>
+        ) : null}
+      </header>
+
+      {!inCall ? (
+        <form className="join-panel" onSubmit={joinRoom}>
+          <h1>Start a video call</h1>
+          <p className="join-copy">
+            Share the same room ID with one other person. Media stays peer-to-peer
+            over WebRTC; Socket.IO only handles signaling.
+          </p>
+          <label className="field">
+            <span>Room ID</span>
+            <input
+              value={roomId}
+              onChange={(e) => setRoomId(e.target.value)}
+              placeholder="e.g. team-standup"
+              autoComplete="off"
+            />
+          </label>
+          <button type="submit" className="primary-btn">
+            Join call
+          </button>
+          {error ? <p className="error">{error}</p> : null}
+        </form>
+      ) : (
+        <div className="stage">
+          <div className="video-grid">
+            <div className="video-tile remote">
+              <video ref={remoteVideoRef} autoPlay playsInline />
+              <span className="tile-label">Remote</span>
+              {status !== "connected" ? (
+                <div className="placeholder">{statusLabel}</div>
+              ) : null}
+            </div>
+            <div className="video-tile local">
+              <video ref={localVideoRef} autoPlay playsInline muted />
+              <span className="tile-label">You</span>
+            </div>
+          </div>
+
+          <div className="controls">
+            <button type="button" className="control-btn" onClick={toggleMute}>
+              {muted ? "Unmute" : "Mute"}
+            </button>
+            <button type="button" className="control-btn" onClick={toggleCamera}>
+              {cameraOff ? "Camera on" : "Camera off"}
+            </button>
+            <button type="button" className="control-btn danger" onClick={leaveRoom}>
+              Leave
+            </button>
+          </div>
+
+          {error ? <p className="error center">{error}</p> : null}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+========================================
+FILE: README.md
+========================================
+# PeerLink — Simple Video Calling
+
+1:1 video calls with **Next.js** (frontend), **Express + Socket.IO** (signaling), and **WebRTC** (peer media).
+
+## Project structure
+
+```
+videocall/
+  client/   Next.js app
+  server/   Express + Socket.IO signaling server
+```
+
+## Prerequisites
+
+- Node.js 18+
+- Camera and microphone access in the browser
+
+## Setup
+
+### 1. Start the signaling server
+
+```bash
+cd server
+npm install
+npm run dev
+```
+
+Runs at [http://localhost:5000](http://localhost:5000).
+
+### 2. Start the Next.js client
+
+```bash
+cd client
+npm install
+npm run dev
+```
+
+Runs at [http://localhost:3000](http://localhost:3000).
+
+Optional: point the client at a different signaling URL:
+
+```bash
+# client/.env.local
+NEXT_PUBLIC_SIGNALING_URL=http://localhost:5000
+```
+
+## How to use
+
+1. Open the app in two browser windows (or two devices on the same network).
+2. Enter the **same room ID** in both (e.g. `demo`).
+3. Click **Join call** and allow camera/mic permissions.
+4. The second joiner triggers the WebRTC handshake; video should appear shortly.
+
+Rooms are limited to **2 people**.
+
+## How it works
+
+1. Both clients connect to the Socket.IO signaling server and join a room.
+2. When a peer is present, one client creates an SDP offer.
+3. Offer, answer, and ICE candidates are relayed through Socket.IO.
+4. Media (audio/video) flows peer-to-peer via WebRTC using public STUN servers.
+
+## Notes
+
+- Works best on `localhost` or HTTPS (browsers require a secure context for `getUserMedia` outside localhost).
+- For calls across different networks/NATs, you may need a TURN server in addition to STUN.
+
+
+========================================
+FILE: server\index.js
+========================================
+const express = require("express");
+const http = require("http");
+const cors = require("cors");
+const { Server } = require("socket.io");
+
+const PORT = process.env.PORT || 5000;
+const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || "http://localhost:3000";
+
+const app = express();
+app.use(cors({ origin: CLIENT_ORIGIN }));
+
+app.get("/health", (_req, res) => {
+  res.json({ ok: true });
+});
+
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: CLIENT_ORIGIN,
+    methods: ["GET", "POST"],
+  },
+});
+
+/** @type {Map<string, Set<string>>} */
+const rooms = new Map();
+
+io.on("connection", (socket) => {
+  socket.on("join-room", ({ roomId }) => {
+    if (!roomId || typeof roomId !== "string") {
+      socket.emit("error-message", { message: "Room ID is required." });
+      return;
+    }
+
+    const id = roomId.trim().toLowerCase();
+    if (!id) {
+      socket.emit("error-message", { message: "Room ID is required." });
+      return;
+    }
+
+    if (!rooms.has(id)) {
+      rooms.set(id, new Set());
+    }
+
+    const members = rooms.get(id);
+
+    if (members.size >= 2) {
+      socket.emit("room-full");
+      return;
+    }
+
+    socket.join(id);
+    socket.data.roomId = id;
+    members.add(socket.id);
+
+    const others = [...members].filter((memberId) => memberId !== socket.id);
+    socket.emit("joined-room", {
+      roomId: id,
+      peers: others,
+    });
+
+    if (others.length > 0) {
+      socket.to(id).emit("peer-joined", { peerId: socket.id });
+    }
+  });
+
+  socket.on("offer", ({ to, sdp }) => {
+    io.to(to).emit("offer", { from: socket.id, sdp });
+  });
+
+  socket.on("answer", ({ to, sdp }) => {
+    io.to(to).emit("answer", { from: socket.id, sdp });
+  });
+
+  socket.on("ice-candidate", ({ to, candidate }) => {
+    io.to(to).emit("ice-candidate", { from: socket.id, candidate });
+  });
+
+  socket.on("leave-room", () => {
+    leaveCurrentRoom(socket);
+  });
+
+  socket.on("disconnect", () => {
+    leaveCurrentRoom(socket);
+  });
+});
+
+function leaveCurrentRoom(socket) {
+  const roomId = socket.data.roomId;
+  if (!roomId) return;
+
+  const members = rooms.get(roomId);
+  if (members) {
+    members.delete(socket.id);
+    if (members.size === 0) {
+      rooms.delete(roomId);
+    }
+  }
+
+  socket.to(roomId).emit("peer-left", { peerId: socket.id });
+  socket.leave(roomId);
+  socket.data.roomId = undefined;
+}
+
+server.listen(PORT, () => {
+  console.log(`Signaling server running on http://localhost:${PORT}`);
+});
+
+
+========================================
+FILE: server\package.json
+========================================
+{
+  "name": "server",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^5.3.0",
+    "socket.io": "^4.8.4"
+  }
+}
