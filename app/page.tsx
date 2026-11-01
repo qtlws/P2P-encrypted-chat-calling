@@ -187,7 +187,18 @@ export default function AppHome() {
   };
 
   const activeConversation = conversations.find((c) => c.id === activeConversationId) || null;
-  const activePeerRecord = activeConversation ? chatManager.getPeer(activeConversation.peerUid) || null : null;
+  const activePeerRecord = activeConversation
+    ? chatManager.getPeer(activeConversation.peerUid) || {
+        uid: activeConversation.peerUid,
+        identityPublicKey: activeConversation.peerEncryptionPublicKey,
+        encryptionPublicKey: activeConversation.peerEncryptionPublicKey,
+        fingerprint: activeConversation.peerIdentityFingerprint,
+        firstSeenAt: activeConversation.createdAt,
+        lastSeenAt: activeConversation.updatedAt,
+        verified: activeConversation.verified,
+        blocked: false,
+      }
+    : null;
   const activeSession = activeConversation ? chatManager.getSession(activeConversation.peerUid) || null : null;
 
   if (isInitializing) {
@@ -201,22 +212,9 @@ export default function AppHome() {
   }
 
   return (
-    <div className="h-screen w-screen bg-zinc-950 text-zinc-100 flex overflow-hidden select-none font-sans">
-      {/* Mobile Back Header when in Chat view */}
-      {mobileView === 'chat' && (
-        <div className="md:hidden fixed top-2 left-2 z-40">
-          <button
-            onClick={() => setMobileView('sidebar')}
-            className="p-2 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-300 shadow-md flex items-center space-x-1 text-xs"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            <span>Chats</span>
-          </button>
-        </div>
-      )}
-
+    <div className="h-dvh h-[100dvh] w-full max-w-full bg-zinc-950 text-zinc-100 flex overflow-hidden select-none font-sans">
       {/* Sidebar Panel */}
-      <div className={`${mobileView === 'sidebar' ? 'block' : 'hidden md:block'} h-full`}>
+      <div className={`${mobileView === 'sidebar' ? 'flex' : 'hidden md:flex'} flex-col w-full md:w-84 lg:w-96 h-full shrink-0 overflow-hidden`}>
         <Sidebar
           identity={identity}
           conversations={conversations}
@@ -230,7 +228,7 @@ export default function AppHome() {
       </div>
 
       {/* Chat Area Panel */}
-      <div className={`${mobileView === 'chat' ? 'flex' : 'hidden md:flex'} flex-1 h-full`}>
+      <div className={`${mobileView === 'chat' ? 'flex' : 'hidden md:flex'} flex-1 flex-col h-full w-full min-w-0 overflow-hidden`}>
         <ChatArea
           identity={identity}
           conversation={activeConversation}
@@ -245,6 +243,7 @@ export default function AppHome() {
             setMobileView('sidebar');
           }}
           isP2PConnected={isP2PConnected}
+          onBack={() => setMobileView('sidebar')}
         />
       </div>
 

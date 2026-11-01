@@ -56,7 +56,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   return (
     <aside
       id="app-sidebar"
-      className="w-full md:w-84 lg:w-96 bg-zinc-900 border-r border-zinc-800 flex flex-col h-full select-none text-zinc-100 flex-shrink-0"
+      className="w-full md:w-84 lg:w-96 max-w-full overflow-hidden bg-zinc-900 border-r border-zinc-800 flex flex-col h-full select-none text-zinc-100 flex-shrink-0 min-w-0"
     >
       {/* Header */}
       <div id="sidebar-header" className="p-4 border-b border-zinc-800 flex items-center justify-between">

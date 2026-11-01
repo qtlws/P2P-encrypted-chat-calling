@@ -20,7 +20,7 @@ export const IncomingCallBanner: React.FC<IncomingCallBannerProps> = ({
   return (
     <div
       id="banner-incoming-call"
-      className="fixed top-5 inset-x-4 max-w-md mx-auto z-50 bg-zinc-900 border border-emerald-500/40 rounded-2xl p-4 shadow-2xl flex items-center justify-between animate-bounce duration-1000"
+      className="fixed top-5 inset-x-4 max-w-md mx-auto z-50 bg-zinc-900/95 border border-emerald-500/50 rounded-2xl p-4 shadow-2xl flex items-center justify-between backdrop-blur-md transition-all"
     >
       <div className="flex items-center space-x-3 min-w-0 pr-2">
         <div className="w-10 h-10 rounded-full bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 flex-shrink-0 animate-pulse">

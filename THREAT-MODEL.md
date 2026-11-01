@@ -20,6 +20,7 @@ We evaluate security under the standard cryptographic threat model:
 | **Replay Attacks** | Cryptographically random nonces (16 bytes) in handshakes, unique UUIDv4 message IDs, local duplicate-detection window, and timestamp validity checks. |
 | **UID Spoofing / Impersonation** | UIDs are not trusted alone. Identity is bound to Ed25519 public keys signed by the private key holder, verified against stored fingerprints. |
 | **Key Substitution / MITM** | Cryptographic fingerprint comparison (`XXXX-XXXX-XXXX-...`) out-of-band and local key-change alert warning if a peer key changes. |
+| **TURN Relay Eavesdropping** | Coturn relays only forward encrypted DTLS-SRTP media packets and encrypted DataChannel frames; relay servers have zero access to decryption keys. |
 | **Casual Storage Inspection** | `secureDataStorage.ts` encrypts all stored state (identities, peers, conversations, messages) with AES-256-GCM. No plaintext in localStorage. |
 
 ---

@@ -79,20 +79,33 @@ type SignalMessage =
 
 ## 2. Key Agreement & Derivation Flow
 
+The protocol supports both dynamic ephemeral session negotiation and deterministic mutual pairwise encryption:
+
+### A. Ephemeral Handshake Session Derivation
 1. **Exchange**: User A transmits `encryptionPublicKey_A` (X25519); User B transmits `encryptionPublicKey_B` (X25519).
 2. **Shared Secret**:
    $$\text{SharedSecret} = \text{X25519}(\text{privKey}_A, \text{pubKey}_B) = \text{X25519}(\text{privKey}_B, \text{pubKey}_A)$$
 3. **Session Context & Salt**:
-   $$\text{CanonicalUIDs} = \text{sort}([\text{uid}_A, \text{uid}_B]).\text{join}(':') + ':' + \text{nonce}_A + ':' + \text{nonce}_B$$
-   $$\text{Salt} = \text{SHA256}(\text{CanonicalUIDs})$$
+   $$\text{CanonicalContext} = \text{sort}([\text{uid}_A, \text{uid}_B]).\text{join}(':') + ':' + \text{nonce}_A + ':' + \text{nonce}_B$$
+   $$\text{Salt} = \text{SHA256}(\text{CanonicalContext})$$
 4. **HKDF Expansion**:
    $$\text{SessionKey} = \text{HKDF-Expand}(\text{PRK} = \text{HKDF-Extract}(\text{Salt}, \text{SharedSecret}), \text{info} = \text{"P2P-E2EE-AES256GCM-v1"}, \text{len} = 32)$$
 
+### B. Deterministic Mutual Root Pairwise Key Derivation
+When establishing peer-to-peer communication across transient sessions or before asynchronous handshakes finalize:
+1. **Salt**:
+   $$\text{CanonicalUIDs} = \text{sort}([\text{uid}_A, \text{uid}_B]).\text{join}(':') + ':SALT'$$
+   $$\text{Salt} = \text{SHA256}(\text{CanonicalUIDs})$$
+2. **Info String**:
+   $$\text{Info} = \text{"P2P-MUTUAL-KEY:"} + \text{sort}([\text{uid}_A, \text{uid}_B]).\text{join}(':') + ':AES-256-GCM'$$
+3. **HKDF Expansion**:
+   $$\text{MutualRootKey} = \text{HKDF-Expand}(\text{PRK} = \text{HKDF-Extract}(\text{Salt}, \text{SharedSecret}), \text{info} = \text{Info}, \text{len} = 32)$$
+
 ---
 
-## 3. DataChannel Message Framing
+## 3. DataChannel & Transport Wire Framing
 
-Messages sent over the direct WebRTC DataChannel (`p2p-chat`) follow this structure:
+Messages sent over direct WebRTC DataChannel (`p2p-chat`) or relayed via encrypted signaling follow this structure:
 
 ```typescript
 interface WireMessage {
@@ -105,8 +118,10 @@ interface WireMessage {
   type: 'text';
   ciphertext: string;                 // Base64 AES-256-GCM ciphertext + auth tag
   iv: string;                         // Base64 12-byte initialization vector
-  senderFingerprint: string;          // Human-readable SHA-256 fingerprint
+  senderFingerprint: string;          // Human-readable SHA-256 fingerprint (XXXX-XXXX-...)
   signature: string;                  // Hex 64-byte Ed25519 signature
+  senderIdentityPublicKey?: string;   // Optional 32-byte Ed25519 hex (enables 0-RTT peer verification)
+  senderEncryptionPublicKey?: string; // Optional 32-byte X25519 hex (enables immediate key agreement)
 }
 ```
 
@@ -118,3 +133,45 @@ interface WireAck {
   timestamp: number;
 }
 ```
+
+---
+
+## 4. Secure Transport Protocol (STP) v2 Envelope
+
+When messages are wrapped in the high-integrity `stp-v2` envelope:
+
+```typescript
+interface STPEnvelope {
+  version: 'stp-v2';
+  senderUid: string;
+  recipientUid: string;
+  ciphertext: string;                 // Base64 AES-256-GCM payload
+  iv: string;                         // Base64 12-byte IV
+  tag: string;                        // Base64 16-byte authentication tag
+  identityPublicKey: string;          // 64-character hex Ed25519 public key
+  signature: string;                  // 128-character hex Ed25519 signature
+  timestamp: number;
+}
+```
+
+---
+
+## 5. ICE Server Configuration Endpoint
+
+Clients query `/api/ice-servers` upon initial peer connection creation:
+
+* **Endpoint**: `GET /api/ice-servers`
+* **Response**:
+  ```json
+  {
+    "iceServers": [
+      { "urls": "stun:stun.l.google.com:19302" },
+      { "urls": "stun:stun1.l.google.com:19302" },
+      {
+        "urls": "turns:your-coturn-server.com:5349?transport=tcp",
+        "username": "...",
+        "credential": "..."
+      }
+    ]
+  }
+  ```

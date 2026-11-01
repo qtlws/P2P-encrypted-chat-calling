@@ -15,6 +15,10 @@ export class DataChannelManager {
   private statusHandlers: Set<ChannelStatusHandler> = new Set();
 
   public createDataChannel(peerUid: string, pc: RTCPeerConnection): RTCDataChannel {
+    const existing = this.channels.get(peerUid);
+    if (existing && existing.readyState !== 'closed') {
+      return existing;
+    }
     const channel = pc.createDataChannel('p2p-chat', {
       ordered: true,
     });
@@ -28,6 +32,10 @@ export class DataChannelManager {
 
   private setupChannel(peerUid: string, channel: RTCDataChannel) {
     this.channels.set(peerUid, channel);
+
+    if (channel.readyState === 'open') {
+      this.notifyStatus(peerUid, true);
+    }
 
     channel.onopen = () => {
       this.notifyStatus(peerUid, true);

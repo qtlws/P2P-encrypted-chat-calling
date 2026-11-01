@@ -1,13 +1,11 @@
 /**
  * PeerConnectionManager
- * Manages RTCPeerConnection instances, STUN ice servers, SDP negotiation, and ICE candidates
+ * Manages RTCPeerConnection instances, STUN/TURN ice servers, SDP negotiation, and ICE candidates
  */
 
 import { signalingClient } from '../signaling/SignalingClient';
 import { ConnectionState } from '@/src/types/peer';
 import { getActiveIceServers } from '@/src/config/coturn';
-import { chatManager } from '../chat/ChatManager';
-import { packSecureTransportMessage } from '@/src/crypto/secureProtocol';
 
 type StateChangeHandler = (peerUid: string, state: ConnectionState) => void;
 type TrackHandler = (peerUid: string, event: RTCTrackEvent) => void;
@@ -21,14 +19,27 @@ export class PeerConnectionManager {
   private onTrack: TrackHandler | null = null;
   private onDataChannel: DataChannelCreatedHandler | null = null;
   private cachedIceServers: RTCIceServer[] | null = null;
+  private makingOffer = new Map<string, boolean>();
+  private operationQueues = new Map<string, Promise<unknown>>();
 
   constructor() {
     this.fetchRemoteIceServers();
   }
 
-  /**
-   * Fetches latest COTURN and STUN configuration from server endpoint
-   */
+  private isPolitePeer(peerUid: string): boolean {
+    if (!this.localUid) return false;
+    return this.localUid < peerUid;
+  }
+
+  private enqueueOperation<T>(peerUid: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.operationQueues.get(peerUid) || Promise.resolve();
+    const next = prev
+      .catch(() => {})
+      .then(fn);
+    this.operationQueues.set(peerUid, next as Promise<unknown>);
+    return next;
+  }
+
   public async fetchRemoteIceServers(): Promise<RTCIceServer[]> {
     if (typeof window === 'undefined') {
       return getActiveIceServers();
@@ -43,7 +54,7 @@ export class PeerConnectionManager {
         }
       }
     } catch {
-      // Fallback to local config
+      // Fallback
     }
     this.cachedIceServers = getActiveIceServers();
     return this.cachedIceServers;
@@ -55,7 +66,6 @@ export class PeerConnectionManager {
         ? this.cachedIceServers
         : getActiveIceServers(),
       iceTransportPolicy: 'all',
-      iceCandidatePoolSize: 2,
     };
   }
 
@@ -73,10 +83,34 @@ export class PeerConnectionManager {
     this.onDataChannel = onDataChannel;
   }
 
+  /**
+   * Resets and creates a fresh RTCPeerConnection for a new call session
+   * Preserves pending candidate queue so early arriving ICE signals are not discarded.
+   */
+  public createFreshConnectionForCall(peerUid: string): RTCPeerConnection {
+    const existing = this.connections.get(peerUid);
+    if (existing) {
+      try { existing.close(); } catch {}
+      this.connections.delete(peerUid);
+    }
+    this.operationQueues.delete(peerUid);
+    return this.getOrCreateConnection(peerUid);
+  }
+
   public getOrCreateConnection(peerUid: string): RTCPeerConnection {
     const existing = this.connections.get(peerUid);
-    if (existing && existing.connectionState !== 'closed') {
+    if (
+      existing &&
+      existing.connectionState !== 'closed' &&
+      existing.connectionState !== 'failed' &&
+      existing.signalingState !== 'closed'
+    ) {
       return existing;
+    }
+
+    if (existing) {
+      try { existing.close(); } catch {}
+      this.connections.delete(peerUid);
     }
 
     const pc = new RTCPeerConnection(this.getRtcConfig());
@@ -84,28 +118,7 @@ export class PeerConnectionManager {
 
     pc.onicecandidate = async (event) => {
       if (event.candidate && this.localUid) {
-        const identity = chatManager.getIdentity();
-        const session = chatManager.getSession(peerUid);
         const candidateData = event.candidate.toJSON();
-
-        if (identity) {
-          try {
-            const securePacket = await packSecureTransportMessage({
-              subType: 'ice-candidate',
-              fromUid: this.localUid,
-              toUid: peerUid,
-              senderPrivateKey: identity.identityPrivateKey,
-              senderFingerprint: identity.fingerprint,
-              sessionKey: session?.sessionKey || null,
-              innerData: { candidate: candidateData },
-            });
-            await signalingClient.send(securePacket);
-            return;
-          } catch (err) {
-            console.warn('[PeerConnectionManager] Failed to pack secure ICE packet:', err);
-          }
-        }
-
         signalingClient.send({
           type: 'ice-candidate',
           fromUid: this.localUid,
@@ -115,20 +128,30 @@ export class PeerConnectionManager {
       }
     };
 
-    pc.onconnectionstatechange = () => {
-      const stateMap: Record<RTCPeerConnectionState, ConnectionState> = {
-        new: 'connecting',
-        connecting: 'connecting',
-        connected: 'connected',
-        disconnected: 'disconnected',
-        failed: 'failed',
-        closed: 'disconnected',
-      };
-      const state = stateMap[pc.connectionState] || 'disconnected';
+    const updateConnectionState = () => {
+      const isConnected =
+        pc.connectionState === 'connected' ||
+        pc.iceConnectionState === 'connected' ||
+        pc.iceConnectionState === 'completed';
+      const isFailed =
+        pc.connectionState === 'failed' ||
+        pc.iceConnectionState === 'failed';
+      const isConnecting =
+        pc.connectionState === 'connecting' ||
+        pc.iceConnectionState === 'checking';
+
+      let state: ConnectionState = 'disconnected';
+      if (isConnected) state = 'connected';
+      else if (isFailed) state = 'failed';
+      else if (isConnecting) state = 'connecting';
+
       if (this.onStateChange) {
         this.onStateChange(peerUid, state);
       }
     };
+
+    pc.onconnectionstatechange = updateConnectionState;
+    pc.oniceconnectionstatechange = updateConnectionState;
 
     pc.ontrack = (event) => {
       if (this.onTrack) {
@@ -145,114 +168,236 @@ export class PeerConnectionManager {
     return pc;
   }
 
-  public async createOffer(peerUid: string): Promise<RTCSessionDescriptionInit> {
-    const pc = this.getOrCreateConnection(peerUid);
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+  public async createOffer(peerUid: string): Promise<RTCSessionDescriptionInit | null> {
+    return this.enqueueOperation(peerUid, async () => {
+      const pc = this.getOrCreateConnection(peerUid);
+      if (pc.signalingState === 'closed') return null;
 
-    if (this.localUid) {
-      const identity = chatManager.getIdentity();
-      const session = chatManager.getSession(peerUid);
-
-      if (identity) {
-        try {
-          const securePacket = await packSecureTransportMessage({
-            subType: 'offer',
-            fromUid: this.localUid,
-            toUid: peerUid,
-            senderPrivateKey: identity.identityPrivateKey,
-            senderFingerprint: identity.fingerprint,
-            sessionKey: session?.sessionKey || null,
-            innerData: { sdp: offer },
-          });
-          await signalingClient.send(securePacket);
-          return offer;
-        } catch (err) {
-          console.warn('[PeerConnectionManager] Failed to pack secure offer packet:', err);
-        }
+      // If already in have-local-offer, we already have a pending offer waiting for answer
+      if (pc.signalingState === 'have-local-offer' && pc.localDescription) {
+        console.log(`[PeerConnectionManager] An offer is already active for peer ${peerUid}`);
+        return pc.localDescription;
       }
 
-      await signalingClient.send({
-        type: 'offer',
-        fromUid: this.localUid,
-        toUid: peerUid,
-        sdp: offer,
-      });
-    }
+      // If remote peer already sent an offer and we are in have-remote-offer:
+      // Peer is the answerer for this negotiation cycle, so createOffer cannot be called
+      if (pc.signalingState === 'have-remote-offer') {
+        console.log(`[PeerConnectionManager] Peer ${peerUid} is in have-remote-offer (answerer), skipping createOffer`);
+        return null;
+      }
 
-    return offer;
+      // W3C WebRTC: createOffer requires stable state
+      if (pc.signalingState !== 'stable') {
+        console.log(`[PeerConnectionManager] Skipping createOffer: signalingState is ${pc.signalingState}`);
+        return null;
+      }
+
+      this.makingOffer.set(peerUid, true);
+
+      try {
+        const offer = await pc.createOffer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: true,
+        });
+
+        const currentSignalingState = pc.signalingState as RTCSignalingState;
+        if (currentSignalingState === 'closed' || pc.connectionState === 'closed') return null;
+
+        if (currentSignalingState !== 'stable' && currentSignalingState !== 'have-local-offer') {
+          console.log(`[PeerConnectionManager] State changed to ${currentSignalingState} during createOffer, aborting setLocalDescription`);
+          return null;
+        }
+
+        await pc.setLocalDescription(offer);
+        const localDesc = pc.localDescription || offer;
+
+        if (this.localUid) {
+          await signalingClient.send({
+            type: 'offer',
+            fromUid: this.localUid,
+            toUid: peerUid,
+            sdp: localDesc,
+          });
+        }
+
+        return localDesc;
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('cannot create an offer in a state other than stable')) {
+          console.log(`[PeerConnectionManager] createOffer safely skipped: signalingState was ${pc.signalingState}`);
+        } else {
+          console.error('[PeerConnectionManager] Error creating offer:', err);
+        }
+        return null;
+      } finally {
+        this.makingOffer.set(peerUid, false);
+      }
+    });
   }
 
   public async handleOffer(
     peerUid: string,
     sdp: RTCSessionDescriptionInit
-  ): Promise<RTCSessionDescriptionInit> {
-    const pc = this.getOrCreateConnection(peerUid);
-    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-
-    // Process any queued ICE candidates
-    await this.drainPendingCandidates(peerUid, pc);
-
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-
-    if (this.localUid) {
-      const identity = chatManager.getIdentity();
-      const session = chatManager.getSession(peerUid);
-
-      if (identity) {
-        try {
-          const securePacket = await packSecureTransportMessage({
-            subType: 'answer',
-            fromUid: this.localUid,
-            toUid: peerUid,
-            senderPrivateKey: identity.identityPrivateKey,
-            senderFingerprint: identity.fingerprint,
-            sessionKey: session?.sessionKey || null,
-            innerData: { sdp: answer },
-          });
-          await signalingClient.send(securePacket);
-          return answer;
-        } catch (err) {
-          console.warn('[PeerConnectionManager] Failed to pack secure answer packet:', err);
-        }
+  ): Promise<RTCSessionDescriptionInit | null> {
+    return this.enqueueOperation(peerUid, async () => {
+      const pc = this.getOrCreateConnection(peerUid);
+      if (!sdp || !sdp.sdp || pc.signalingState === 'closed') {
+        return null;
       }
 
-      await signalingClient.send({
-        type: 'answer',
-        fromUid: this.localUid,
-        toUid: peerUid,
-        sdp: answer,
-      });
-    }
+      try {
+        // 1. Duplicate offer check: if this exact offer is already set as remoteDescription
+        if (pc.remoteDescription?.sdp === sdp.sdp) {
+          console.log(`[PeerConnectionManager] Duplicate offer already applied for ${peerUid}`);
+          if (pc.localDescription) {
+            if (this.localUid) {
+              signalingClient.send({
+                type: 'answer',
+                fromUid: this.localUid,
+                toUid: peerUid,
+                sdp: pc.localDescription,
+              }).catch(() => {});
+            }
+            return pc.localDescription;
+          }
+        }
 
-    return answer;
+        // 2. Glare handling: Perfect Negotiation with polite peer arbitration
+        const isMakingOffer = !!this.makingOffer.get(peerUid);
+        const isOfferCollision = pc.signalingState !== 'stable' || isMakingOffer;
+        const isPolite = this.isPolitePeer(peerUid);
+
+        if (isOfferCollision) {
+          if (!isPolite) {
+            console.log(`[PeerConnectionManager] Glare collision detected. Impolite peer ignoring offer from ${peerUid}`);
+            return null;
+          }
+
+          // Polite peer: roll back our own local offer if we have one
+          if (pc.signalingState === 'have-local-offer') {
+            try {
+              await pc.setLocalDescription({ type: 'rollback' });
+            } catch (e) {
+              console.warn('[PeerConnectionManager] Rollback of local offer:', e);
+            }
+          }
+        }
+
+        // 3. Set remote description
+        if (pc.signalingState !== 'stable' && pc.signalingState !== 'have-local-offer') {
+          console.log(`[PeerConnectionManager] Skipping handleOffer: signalingState is ${pc.signalingState}`);
+          return null;
+        }
+
+        try {
+          await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+        } catch (setRemoteErr: unknown) {
+          const errStr = setRemoteErr instanceof Error ? setRemoteErr.message : String(setRemoteErr);
+          if (errStr.includes('Called in wrong state')) {
+            console.log(`[PeerConnectionManager] Remote description already active for ${peerUid}`);
+            return pc.localDescription;
+          }
+          throw setRemoteErr;
+        }
+
+        await this.drainPendingCandidates(peerUid, pc);
+
+        // 4. Create answer - only legal in have-remote-offer
+        const stateBeforeAnswer = pc.signalingState as RTCSignalingState;
+        if (stateBeforeAnswer !== 'have-remote-offer') {
+          console.log(`[PeerConnectionManager] Expected have-remote-offer, currently ${stateBeforeAnswer}. Skipping answer creation.`);
+          return pc.localDescription;
+        }
+
+        const answer = await pc.createAnswer();
+
+        // 5. Set local description - ensure state is strictly have-remote-offer
+        const stateBeforeLocalDesc = pc.signalingState as RTCSignalingState;
+        if (stateBeforeLocalDesc !== 'have-remote-offer') {
+          console.log(`[PeerConnectionManager] State changed to ${stateBeforeLocalDesc} before setLocalDescription(answer). Skipping.`);
+          return pc.localDescription;
+        }
+
+        await pc.setLocalDescription(answer);
+        const localDesc = pc.localDescription || answer;
+
+        if (this.localUid) {
+          await signalingClient.send({
+            type: 'answer',
+            fromUid: this.localUid,
+            toUid: peerUid,
+            sdp: localDesc,
+          });
+        }
+
+        return localDesc;
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('Called in wrong state: stable')) {
+          console.log(`[PeerConnectionManager] Offer already answered or settled for ${peerUid} (stable state)`);
+          return pc.localDescription;
+        }
+        console.error('[PeerConnectionManager] Error handling offer:', err);
+        return null;
+      }
+    });
   }
 
   public async handleAnswer(
     peerUid: string,
     sdp: RTCSessionDescriptionInit
   ): Promise<void> {
-    const pc = this.connections.get(peerUid);
-    if (!pc) return;
+    return this.enqueueOperation(peerUid, async () => {
+      const pc = this.connections.get(peerUid);
+      if (!pc || !sdp || !sdp.sdp || pc.signalingState === 'closed') return;
 
-    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-    await this.drainPendingCandidates(peerUid, pc);
+      // Duplicate answer check
+      if (pc.remoteDescription?.sdp === sdp.sdp) {
+        console.log(`[PeerConnectionManager] Answer already applied for ${peerUid}`);
+        await this.drainPendingCandidates(peerUid, pc);
+        return;
+      }
+
+      // Per WebRTC (JSEP) standard:
+      // Calling setRemoteDescription with an answer is ONLY legal when signalingState is
+      // 'have-local-offer' or 'have-remote-pranswer'.
+      if (pc.signalingState !== 'have-local-offer' && pc.signalingState !== 'have-remote-pranswer') {
+        console.log(
+          `[PeerConnectionManager] Skipping setRemoteDescription for peer ${peerUid}: signalingState is '${pc.signalingState}' (already settled or not expecting answer)`
+        );
+        if (pc.remoteDescription && pc.remoteDescription.type) {
+          await this.drainPendingCandidates(peerUid, pc);
+        }
+        return;
+      }
+
+      try {
+        await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+        await this.drainPendingCandidates(peerUid, pc);
+      } catch (err: unknown) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        if (errorMsg.includes('Called in wrong state: stable') || errorMsg.includes('Called in wrong state')) {
+          console.log(`[PeerConnectionManager] Answer already applied for ${peerUid} (stable state)`);
+        } else {
+          console.error('[PeerConnectionManager] Failed to set remote answer description:', err);
+        }
+      }
+    });
   }
 
   public async handleIceCandidate(
     peerUid: string,
     candidate: RTCIceCandidateInit
   ): Promise<void> {
+    if (!candidate) return;
     const pc = this.connections.get(peerUid);
-    if (pc && pc.remoteDescription && pc.remoteDescription.type) {
+    if (pc && pc.connectionState !== 'closed' && pc.signalingState !== 'closed' && pc.remoteDescription && pc.remoteDescription.type) {
       try {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        await pc.addIceCandidate(candidate);
       } catch (e) {
         console.warn('[PeerConnectionManager] Failed to add ICE candidate:', e);
       }
     } else {
-      // Queue until remote description is set
       const queue = this.pendingCandidates.get(peerUid) || [];
       queue.push(candidate);
       this.pendingCandidates.set(peerUid, queue);
@@ -263,23 +408,31 @@ export class PeerConnectionManager {
     const queue = this.pendingCandidates.get(peerUid);
     if (!queue || queue.length === 0) return;
 
+    // Clear queue upfront to prevent duplicate draining loops
+    this.pendingCandidates.delete(peerUid);
+
     for (const candidate of queue) {
       try {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        if (pc.connectionState !== 'closed' && pc.signalingState !== 'closed') {
+          await pc.addIceCandidate(candidate);
+        }
       } catch (e) {
         console.warn('[PeerConnectionManager] Drain ICE error:', e);
       }
     }
-    this.pendingCandidates.delete(peerUid);
   }
 
-  public closeConnection(peerUid: string) {
+  public closeConnection(peerUid: string, clearCandidates = true) {
     const pc = this.connections.get(peerUid);
     if (pc) {
-      pc.close();
+      try { pc.close(); } catch {}
       this.connections.delete(peerUid);
     }
-    this.pendingCandidates.delete(peerUid);
+    this.operationQueues.delete(peerUid);
+    this.makingOffer.delete(peerUid);
+    if (clearCandidates) {
+      this.pendingCandidates.delete(peerUid);
+    }
   }
 
   public getConnection(peerUid: string): RTCPeerConnection | undefined {

@@ -89,8 +89,9 @@ export const PeerVerificationModal: React.FC<PeerVerificationModalProps> = ({
               id="btn-toggle-verify-peer"
               onClick={async () => {
                 await onToggleVerified(peer.uid, !peer.verified);
+                onClose();
               }}
-              className={`w-full py-2.5 px-4 rounded-xl font-medium text-xs flex items-center justify-center space-x-2 transition-colors ${
+              className={`w-full py-2.5 px-4 rounded-xl font-medium text-xs flex items-center justify-center space-x-2 transition-colors cursor-pointer ${
                 peer.verified
                   ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300'
                   : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm'
