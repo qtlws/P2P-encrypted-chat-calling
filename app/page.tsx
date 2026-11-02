@@ -260,6 +260,14 @@ export default function AppHome() {
         onEndCall={() => callManager.endCall()}
         onToggleAudio={() => callManager.toggleAudio()}
         onToggleVideo={() => callManager.toggleVideo()}
+        onTogglePin={(peerUid) => callManager.togglePin(peerUid)}
+        onSetZoomLevel={(level) => callManager.setZoomLevel(level)}
+        onToggleMinimize={() => callManager.toggleMinimize()}
+        onAcceptCallWaitingAndHold={() => callManager.acceptCallWaitingAndHoldCurrent()}
+        onRejectCallWaiting={() => callManager.rejectCallWaiting()}
+        onMergeCallWaiting={() => callManager.mergeCallWaiting()}
+        onMergeHeldCall={(id) => callManager.mergeHeldCall(id)}
+        onResumeHeldCall={(id) => callManager.resumeHeldCall(id)}
       />
 
       {/* New Chat Modal */}

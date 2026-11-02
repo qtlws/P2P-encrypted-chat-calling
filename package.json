@@ -1,6 +1,6 @@
 {
-  "name": "ai-studio-applet",
-  "version": "0.1.0",
+  "name": "p2p-encrypted-chat-calling",
+  "version": "1.1.1",
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000 -H 0.0.0.0",
@@ -10,7 +10,6 @@
     "clean": "next clean"
   },
   "dependencies": {
-    "@google/genai": "^2.4.0",
     "@hookform/resolvers": "^5.2.1",
     "@noble/curves": "^2.4.0",
     "@noble/hashes": "^2.4.0",

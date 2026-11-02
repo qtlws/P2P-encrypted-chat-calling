@@ -114,6 +114,21 @@ export class ChatManager {
   }
 
   /**
+   * Returns true if a peer UID is known to the local user
+   * (e.g. self, or completed cryptographic handshake, or existing conversation)
+   */
+  public isPeerKnown(peerUid: string): boolean {
+    if (!peerUid) return false;
+    if (this.identity && this.identity.uid === peerUid) return true;
+    const peer = this.peerRecords.get(peerUid);
+    if (peer && (peer.identityPublicKey || peer.verified)) return true;
+    const hasConv = Array.from(this.conversations.values()).some((c) => c.peerUid === peerUid);
+    if (hasConv) return true;
+    return false;
+  }
+
+
+  /**
    * Load stored peer records, conversations, and decrypted messages into memory
    */
   private async hydrateFromStorage() {
@@ -293,6 +308,26 @@ export class ChatManager {
           callManager.handleCallRejected(peerUid);
           break;
         }
+        case 'call-busy-waiting': {
+          callManager.handleCallBusyWaiting(peerUid, unpackedPayload?.reason);
+          break;
+        }
+        case 'call-hold': {
+          callManager.handleRemoteHold(peerUid);
+          break;
+        }
+        case 'call-resume': {
+          callManager.handleRemoteResume(peerUid);
+          break;
+        }
+        case 'call-mesh-join': {
+          await callManager.handleMeshJoin(peerUid, unpackedPayload);
+          break;
+        }
+        case 'call-participant-left': {
+          callManager.handleParticipantLeft(unpackedPayload?.peerUid || peerUid);
+          break;
+        }
         case 'message-ack': {
           if (unpackedPayload) {
             this.handleIncomingAck(unpackedPayload);
@@ -349,6 +384,26 @@ export class ChatManager {
       }
       case 'call-hangup': {
         callManager.handleCallRejected(signal.fromUid || signal.from);
+        break;
+      }
+      case 'call-busy-waiting': {
+        callManager.handleCallBusyWaiting(signal.fromUid || signal.from, signal.reason);
+        break;
+      }
+      case 'call-hold': {
+        callManager.handleRemoteHold(signal.fromUid || signal.from);
+        break;
+      }
+      case 'call-resume': {
+        callManager.handleRemoteResume(signal.fromUid || signal.from);
+        break;
+      }
+      case 'call-mesh-join': {
+        await callManager.handleMeshJoin(signal.fromUid || signal.from, signal);
+        break;
+      }
+      case 'call-participant-left': {
+        callManager.handleParticipantLeft(signal.peerUid || signal.fromUid || signal.from);
         break;
       }
     }
