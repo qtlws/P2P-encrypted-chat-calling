@@ -85,6 +85,38 @@ export type SignalMessage =
       toUid: string;
     }
   | {
+      type: 'call-busy-waiting';
+      fromUid: string;
+      toUid: string;
+      reason?: string;
+    }
+  | {
+      type: 'call-hold';
+      fromUid: string;
+      toUid: string;
+    }
+  | {
+      type: 'call-resume';
+      fromUid: string;
+      toUid: string;
+    }
+  | {
+      type: 'call-mesh-join';
+      fromUid: string;
+      toUid: string;
+      newPeerUid: string;
+      callType: 'video' | 'audio';
+      shouldInitiate?: boolean;
+      allParticipants?: string[];
+    }
+  | {
+      type: 'call-participant-left';
+      fromUid: string;
+      toUid: string;
+      peerUid: string;
+    }
+  | {
       type: 'peer-offline';
       targetUid: string;
     };
+

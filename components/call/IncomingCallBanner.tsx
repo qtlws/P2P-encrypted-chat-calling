@@ -1,8 +1,9 @@
 'use client';
 
 import React from 'react';
-import { Phone, PhoneOff, Video, User } from 'lucide-react';
+import { Phone, PhoneOff, Video, User, Shield } from 'lucide-react';
 import { ActiveCall } from '@/src/types/webrtc';
+import { chatManager } from '@/src/services/chat/ChatManager';
 
 interface IncomingCallBannerProps {
   call: ActiveCall | null;
@@ -17,6 +18,9 @@ export const IncomingCallBanner: React.FC<IncomingCallBannerProps> = ({
 }) => {
   if (!call || call.state !== 'incoming') return null;
 
+  const isKnown = chatManager.isPeerKnown(call.peerUid);
+  const callerLabel = isKnown ? call.peerUid : 'Anonymous Peer';
+
   return (
     <div
       id="banner-incoming-call"
@@ -29,8 +33,14 @@ export const IncomingCallBanner: React.FC<IncomingCallBannerProps> = ({
         <div className="min-w-0">
           <div className="text-xs font-semibold text-zinc-100 flex items-center space-x-1.5">
             <span>Incoming {call.callType === 'video' ? 'Video' : 'Audio'} Call</span>
+            {!isKnown && (
+              <span className="px-1.5 py-0.2 rounded bg-indigo-500/20 text-indigo-300 text-[10px] font-mono flex items-center space-x-0.5">
+                <Shield className="w-2.5 h-2.5" />
+                <span>Anonymous</span>
+              </span>
+            )}
           </div>
-          <p className="text-[11px] font-mono text-zinc-400 truncate">{call.peerUid}</p>
+          <p className="text-[11px] font-mono text-zinc-400 truncate">{callerLabel}</p>
         </div>
       </div>
 
