@@ -25,10 +25,96 @@ import {
   Shield,
   Users,
   PhoneIncoming,
+  UserPlus,
+  PhoneForwarded,
+  X,
+  AlertCircle,
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { ActiveCall, CallParticipant } from '@/src/types/webrtc';
 import { chatManager } from '@/src/services/chat/ChatManager';
+import { callManager } from '@/src/services/webrtc/CallManager';
+
+/**
+ * Dedicated, resilient audio stream player for remote call participants.
+ * Automatically handles autoplay unlocking, dynamic track attachments, and volume control.
+ */
+const RemoteAudioPlayer: React.FC<{
+  peerUid: string;
+  stream: MediaStream | null;
+  onHold?: boolean;
+}> = ({ peerUid, stream, onHold = false }) => {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
+
+  useEffect(() => {
+    const audioEl = audioRef.current;
+    if (!audioEl || !stream) return;
+
+    if (audioEl.srcObject !== stream) {
+      audioEl.srcObject = stream;
+    }
+
+    const tryPlay = () => {
+      if (onHold) {
+        audioEl.pause();
+        return;
+      }
+      audioEl.play().then(() => {
+        setAutoplayBlocked(false);
+      }).catch((err) => {
+        if (err && err.name === 'NotAllowedError') {
+          setAutoplayBlocked(true);
+        }
+      });
+    };
+
+    tryPlay();
+
+    const handleTrackChange = () => {
+      audioEl.srcObject = stream;
+      tryPlay();
+    };
+
+    stream.addEventListener('addtrack', handleTrackChange);
+    stream.addEventListener('removetrack', handleTrackChange);
+
+    return () => {
+      stream.removeEventListener('addtrack', handleTrackChange);
+      stream.removeEventListener('removetrack', handleTrackChange);
+    };
+  }, [stream, onHold]);
+
+  const handleManualUnlock = () => {
+    if (audioRef.current) {
+      audioRef.current.play().then(() => setAutoplayBlocked(false)).catch(() => {});
+    }
+  };
+
+  return (
+    <>
+      <audio
+        ref={audioRef}
+        autoPlay
+        playsInline
+        className="hidden"
+        aria-hidden="true"
+      />
+      {autoplayBlocked && (
+        <div
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleManualUnlock(); }}
+          onClick={handleManualUnlock}
+          className="fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl bg-amber-500 text-black font-semibold text-xs flex items-center space-x-2 shadow-2xl cursor-pointer select-none animate-pulse"
+        >
+          <Volume2 className="w-4 h-4" />
+          <span>Click to enable incoming audio ({peerUid.slice(0, 8)}...)</span>
+        </div>
+      )}
+    </>
+  );
+};
 
 interface VideoCallModalProps {
   call: ActiveCall | null;
@@ -282,6 +368,28 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
     dragStartRef.current = null;
   };
 
+  // Add participant dialog state
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [targetPeerInput, setTargetPeerInput] = useState('');
+  const [isAdding, setIsAdding] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
+
+  const handleAddParticipant = async (peerUidToInvite: string) => {
+    const uid = peerUidToInvite.trim();
+    if (!uid) return;
+    setIsAdding(true);
+    setAddError(null);
+    try {
+      await callManager.addParticipantToCall(uid);
+      setTargetPeerInput('');
+      setShowAddModal(false);
+    } catch (err: unknown) {
+      setAddError(err instanceof Error ? err.message : 'Failed to add participant to call');
+    } finally {
+      setIsAdding(false);
+    }
+  };
+
   if (!call || call.state === 'incoming' || call.state === 'idle') return null;
 
   const isVideo = call.callType === 'video';
@@ -340,23 +448,46 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
       : 'Active Call';
 
     return (
-      <div
+      <motion.div
         id="floating-call-pip"
-        className="fixed bottom-5 right-5 z-50 w-80 sm:w-88 rounded-2xl bg-zinc-900/95 border border-zinc-700/80 shadow-2xl backdrop-blur-md overflow-hidden flex flex-col select-none transition-all"
+        drag
+        dragMomentum={false}
+        className="fixed bottom-24 right-3 sm:bottom-28 sm:right-6 z-50 w-[50%] min-w-[175px] max-w-[220px] sm:w-72 sm:max-w-none rounded-2xl bg-zinc-900/95 border border-zinc-700/90 shadow-2xl shadow-black/80 backdrop-blur-md overflow-hidden flex flex-col select-none touch-none"
       >
-        {/* Floating Header */}
-        <div className="px-3 py-2 bg-zinc-800/80 border-b border-zinc-700/60 flex items-center justify-between">
-          <div className="flex items-center space-x-2 min-w-0">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span className="text-xs font-mono font-medium text-zinc-100 truncate">{titleText}</span>
-            <span className="text-[10px] font-mono text-emerald-400 px-1.5 py-0.2 rounded bg-emerald-500/10">
+        {/* Remote Audio Players in PiP mode (ensures audio continuously streams) */}
+        <div className="sr-only" aria-hidden="true">
+          {participants.map((p) => (
+            <RemoteAudioPlayer
+              key={`pip-audio-${p.peerUid}`}
+              peerUid={p.peerUid}
+              stream={p.stream || null}
+              onHold={p.onHold || call.state === 'on-hold'}
+            />
+          ))}
+          {call.remoteStream && !participants.some((p) => p.stream === call.remoteStream) && (
+            <RemoteAudioPlayer
+              key="pip-audio-fallback"
+              peerUid={call.peerUid}
+              stream={call.remoteStream}
+              onHold={call.state === 'on-hold'}
+            />
+          )}
+        </div>
+
+        {/* Draggable Header */}
+        <div className="px-2.5 py-1.5 bg-zinc-800/90 border-b border-zinc-700/60 flex items-center justify-between cursor-move">
+          <div className="flex items-center space-x-1.5 min-w-0">
+            <GripHorizontal className="w-3 h-3 text-zinc-400 shrink-0" />
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+            <span className="text-[11px] sm:text-xs font-mono font-medium text-zinc-100 truncate">{titleText}</span>
+            <span className="text-[9px] sm:text-[10px] font-mono text-emerald-400 px-1 py-0.2 rounded bg-emerald-500/10">
               {formatSeconds(callDuration)}
             </span>
           </div>
           <div className="flex items-center space-x-1 shrink-0">
             <button
               onClick={onToggleMinimize}
-              className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-700/60 transition-colors cursor-pointer"
+              className="p-1 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-700/60 transition-colors cursor-pointer"
               title="Expand to Full Screen"
             >
               <Maximize2 className="w-3.5 h-3.5" />
@@ -379,20 +510,20 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
               className="w-full h-full object-cover"
             />
           ) : (
-            <div className="flex flex-col items-center justify-center p-3 text-center">
-              <div className="w-10 h-10 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-zinc-400 mb-1">
-                {isPrimaryKnown ? <User className="w-5 h-5" /> : <Shield className="w-5 h-5 text-indigo-400" />}
+            <div className="flex flex-col items-center justify-center p-2 text-center">
+              <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-zinc-400 mb-1">
+                {isPrimaryKnown ? <User className="w-4 h-4 sm:w-5 sm:h-5" /> : <Shield className="w-4 h-4 sm:w-5 sm:h-5 text-indigo-400" />}
               </div>
-              <span className="text-[11px] font-mono text-zinc-300 truncate max-w-[180px]">{titleText}</span>
-              <span className="text-[10px] font-mono text-zinc-500">
-                {candidateCount} Candidates in mesh
+              <span className="text-[10px] sm:text-[11px] font-mono text-zinc-300 truncate max-w-[140px]">{titleText}</span>
+              <span className="text-[9px] sm:text-[10px] font-mono text-zinc-500">
+                {candidateCount} in mesh
               </span>
             </div>
           )}
 
           {/* Mini local user camera preview */}
           {isVideo && call.localStream && (
-            <div className="absolute bottom-2 right-2 w-16 h-12 rounded-lg bg-zinc-900 border border-white/20 overflow-hidden shadow-lg">
+            <div className="absolute bottom-1.5 right-1.5 w-12 h-9 sm:w-16 sm:h-12 rounded-lg bg-zinc-900 border border-white/20 overflow-hidden shadow-lg">
               <video
                 autoPlay
                 playsInline
@@ -415,11 +546,11 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
 
           {/* PiP Call Waiting Badge if someone is calling */}
           {callWaiting && (
-            <div className="absolute inset-x-2 top-2 z-20 p-2 rounded-xl bg-amber-950/95 border border-amber-600/80 shadow-lg text-[10px] font-mono text-amber-200 flex items-center justify-between">
+            <div className="absolute inset-x-1 top-1 z-20 p-1.5 rounded-lg bg-amber-950/95 border border-amber-600/80 shadow-lg text-[9px] font-mono text-amber-200 flex items-center justify-between">
               <span className="truncate">Call waiting...</span>
               <button
                 onClick={onToggleMinimize}
-                className="px-2 py-0.5 rounded bg-amber-600 text-white font-medium hover:bg-amber-500"
+                className="px-1.5 py-0.5 rounded bg-amber-600 text-white font-medium hover:bg-amber-500"
               >
                 View
               </button>
@@ -428,47 +559,59 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
         </div>
 
         {/* Quick PiP Floating Action Controls */}
-        <div className="p-2.5 bg-zinc-900 border-t border-zinc-800 flex items-center justify-around">
+        <div className="p-1.5 sm:p-2 bg-zinc-900 border-t border-zinc-800 flex items-center justify-around">
           <button
             onClick={onToggleAudio}
-            className={`p-2 rounded-full cursor-pointer transition-colors ${
+            className={`p-1.5 rounded-full cursor-pointer transition-colors ${
               isAudioMuted
                 ? 'bg-rose-600/20 text-rose-400 border border-rose-500/40'
                 : 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700'
             }`}
             title={isAudioMuted ? 'Unmute' : 'Mute'}
           >
-            {isAudioMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+            {isAudioMuted ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
           </button>
           {isVideo && (
             <button
               onClick={onToggleVideo}
-              className={`p-2 rounded-full cursor-pointer transition-colors ${
+              className={`p-1.5 rounded-full cursor-pointer transition-colors ${
                 isVideoMuted
                   ? 'bg-rose-600/20 text-rose-400 border border-rose-500/40'
                   : 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700'
               }`}
               title={isVideoMuted ? 'Camera On' : 'Camera Off'}
             >
-              {isVideoMuted ? <VideoOff className="w-4 h-4" /> : <Video className="w-4 h-4" />}
+              {isVideoMuted ? <VideoOff className="w-3.5 h-3.5" /> : <Video className="w-3.5 h-3.5" />}
+            </button>
+          )}
+          {candidateCount < 5 && (
+            <button
+              onClick={() => {
+                onToggleMinimize?.();
+                setShowAddModal(true);
+              }}
+              className="p-1.5 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-200 cursor-pointer transition-colors"
+              title="Add Person to Call"
+            >
+              <UserPlus className="w-3.5 h-3.5" />
             </button>
           )}
           <button
             onClick={onToggleMinimize}
-            className="p-2 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-200 cursor-pointer transition-colors"
+            className="p-1.5 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-200 cursor-pointer transition-colors"
             title="Expand Call Window"
           >
-            <Maximize2 className="w-4 h-4" />
+            <Maximize2 className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={onEndCall}
-            className="p-2 rounded-full bg-rose-600 hover:bg-rose-500 text-white cursor-pointer transition-colors shadow-md"
+            className="p-1.5 rounded-full bg-rose-600 hover:bg-rose-500 text-white cursor-pointer transition-colors shadow-md"
             title="End Call"
           >
-            <PhoneOff className="w-4 h-4" />
+            <PhoneOff className="w-3.5 h-3.5" />
           </button>
         </div>
-      </div>
+      </motion.div>
     );
   }
 
@@ -484,6 +627,29 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
       id="modal-active-call"
       className="fixed inset-0 z-50 bg-zinc-950 flex flex-col select-none overflow-hidden"
     >
+      {/* -------------------------------------------------------- */}
+      {/* GLOBAL REMOTE AUDIO STREAMS PLAYER (Video & Audio Calls)  */}
+      {/* Ensures every remote candidate's audio track plays 100%   */}
+      {/* -------------------------------------------------------- */}
+      <div className="sr-only" aria-hidden="true">
+        {participants.map((p) => (
+          <RemoteAudioPlayer
+            key={`full-audio-${p.peerUid}`}
+            peerUid={p.peerUid}
+            stream={p.stream || null}
+            onHold={p.onHold || call.state === 'on-hold'}
+          />
+        ))}
+        {call.remoteStream && !participants.some((p) => p.stream === call.remoteStream) && (
+          <RemoteAudioPlayer
+            key="full-audio-fallback"
+            peerUid={call.peerUid}
+            stream={call.remoteStream}
+            onHold={call.state === 'on-hold'}
+          />
+        )}
+      </div>
+
       {/* ============================================================== */}
       {/* Header Bar: Status, Encryption Badge, Candidates, Minimize */}
       {/* ============================================================== */}
@@ -937,9 +1103,11 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
           /* -------------------------------------------------------- */
           /* DEDICATED AUDIO CALL SCREEN (1 to 5 candidates)          */
           /* -------------------------------------------------------- */
-          <div className="flex flex-col items-center justify-center text-center p-6 z-10 max-w-md">
+          <div className="flex flex-col items-center justify-center text-center p-6 z-10 max-w-lg w-full">
             <div className="relative mb-6">
-              <div className="w-28 h-28 rounded-full bg-zinc-900 border-2 border-emerald-500/40 flex items-center justify-center text-zinc-300 shadow-2xl">
+              <div className="w-28 h-28 rounded-full bg-zinc-900 border-2 border-emerald-500/40 flex items-center justify-center text-zinc-300 shadow-2xl relative">
+                {/* Audio pulse ring */}
+                <div className="absolute inset-0 rounded-full border-2 border-emerald-400/30 animate-ping pointer-events-none" />
                 {candidateCount > 2 ? (
                   <Users className="w-14 h-14 text-emerald-400" />
                 ) : chatManager.isPeerKnown(call.peerUid) ? (
@@ -953,7 +1121,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
               </div>
             </div>
 
-            <h4 className="text-base font-semibold text-zinc-100 font-mono mb-1 truncate max-w-xs">
+            <h4 className="text-base font-semibold text-zinc-100 font-mono mb-1 truncate max-w-sm">
               {candidateCount > 2
                 ? `Group Audio Call (${candidateCount} Candidates)`
                 : chatManager.isPeerKnown(call.peerUid)
@@ -961,10 +1129,11 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
                 : 'Anonymous Peer'}
             </h4>
 
-            <div className="text-xs font-mono text-zinc-400 mb-3">
+            <div className="text-xs font-mono text-zinc-400 mb-4">
               {call.state === 'connected' ? (
-                <span className="text-emerald-400 font-medium">
-                  Direct Audio Mesh Active • {formatSeconds(callDuration)}
+                <span className="text-emerald-400 font-medium flex items-center justify-center space-x-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span>Direct Audio Mesh Active • {formatSeconds(callDuration)}</span>
                 </span>
               ) : call.state === 'on-hold' ? (
                 <span className="text-amber-400">Call On Hold</span>
@@ -975,25 +1144,75 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
               )}
             </div>
 
-            {/* Audio mesh participant avatars */}
-            {candidateCount > 2 && (
-              <div className="flex items-center justify-center -space-x-2 my-2">
-                {participants.map((p, idx) => {
-                  const known = chatManager.isPeerKnown(p.peerUid);
-                  return (
-                    <div
-                      key={p.peerUid}
-                      title={known ? p.peerUid : 'Anonymous Candidate'}
-                      className="w-8 h-8 rounded-full bg-zinc-800 border-2 border-zinc-950 flex items-center justify-center text-zinc-300 text-xs font-mono shadow"
-                    >
-                      {known ? idx + 1 : <Shield className="w-3.5 h-3.5 text-indigo-400" />}
-                    </div>
-                  );
-                })}
+            {/* Audio mesh participant cards */}
+            <div className="w-full grid grid-cols-2 sm:grid-cols-3 gap-2.5 my-3 max-w-md">
+              {/* Local User Card */}
+              <div className="p-3 rounded-xl bg-zinc-900/90 border border-zinc-800 flex flex-col items-center text-center">
+                <div className="w-10 h-10 rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 mb-1.5">
+                  <User className="w-5 h-5" />
+                </div>
+                <span className="text-xs font-mono text-zinc-200 font-medium">You (Local)</span>
+                <span className="text-[10px] font-mono text-zinc-400 flex items-center space-x-1 mt-0.5">
+                  {isAudioMuted ? (
+                    <span className="text-rose-400 flex items-center space-x-0.5">
+                      <MicOff className="w-3 h-3" />
+                      <span>Muted</span>
+                    </span>
+                  ) : (
+                    <span className="text-emerald-400 flex items-center space-x-0.5">
+                      <Mic className="w-3 h-3" />
+                      <span>Speaking</span>
+                    </span>
+                  )}
+                </span>
               </div>
-            )}
 
-            <div className="flex items-center space-x-1.5 text-xs text-zinc-500 font-mono mt-2">
+              {/* Remote Participants Cards */}
+              {participants.map((p) => {
+                const known = chatManager.isPeerKnown(p.peerUid);
+                return (
+                  <div
+                    key={p.peerUid}
+                    className="p-3 rounded-xl bg-zinc-900/90 border border-zinc-800 flex flex-col items-center text-center"
+                  >
+                    <div className="w-10 h-10 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-zinc-300 mb-1.5">
+                      {known ? <User className="w-5 h-5 text-emerald-400" /> : <Shield className="w-5 h-5 text-indigo-400" />}
+                    </div>
+                    <span className="text-xs font-mono text-zinc-200 font-medium truncate max-w-[110px]" title={known ? p.peerUid : 'Anonymous Peer'}>
+                      {known ? `${p.peerUid.slice(0, 8)}...` : 'Anonymous'}
+                    </span>
+                    <span className="text-[10px] font-mono text-zinc-400 flex items-center space-x-1 mt-0.5">
+                      {p.onHold ? (
+                        <span className="text-amber-400">On Hold</span>
+                      ) : (
+                        <span className="text-emerald-400 flex items-center space-x-0.5">
+                          <Volume2 className="w-3 h-3 animate-pulse" />
+                          <span>Connected</span>
+                        </span>
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Add Person Button in Audio Screen */}
+            <div className="flex items-center space-x-3 mt-3">
+              {candidateCount < 5 ? (
+                <button
+                  type="button"
+                  onClick={() => setShowAddModal(true)}
+                  className="px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-xs font-mono text-emerald-400 hover:text-emerald-300 flex items-center space-x-2 cursor-pointer shadow transition-colors"
+                >
+                  <UserPlus className="w-4 h-4" />
+                  <span>Add Person to Call ({candidateCount}/5)</span>
+                </button>
+              ) : (
+                <span className="text-xs font-mono text-zinc-500">Maximum 5 candidates in audio call</span>
+              )}
+            </div>
+
+            <div className="flex items-center space-x-1.5 text-xs text-zinc-500 font-mono mt-4">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
               <span>Zero-knowledge end-to-end direct audio</span>
             </div>
@@ -1004,7 +1223,7 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
       {/* ============================================================== */}
       {/* Call Controls Bar                                              */}
       {/* ============================================================== */}
-      <footer className="h-20 shrink-0 bg-zinc-900/95 border-t border-zinc-800 flex items-center justify-center space-x-5 z-30 px-4 backdrop-blur-md pb-[env(safe-area-inset-bottom,0px)]">
+      <footer className="h-20 shrink-0 bg-zinc-900/95 border-t border-zinc-800 flex items-center justify-center space-x-4 sm:space-x-5 z-30 px-4 backdrop-blur-md pb-[env(safe-area-inset-bottom,0px)]">
         {/* Toggle Audio */}
         <button
           id="btn-toggle-audio"
@@ -1037,6 +1256,22 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
           </button>
         )}
 
+        {/* Add Person / Add Call Button */}
+        {candidateCount < 5 && (
+          <button
+            id="btn-add-call"
+            type="button"
+            onClick={() => setShowAddModal(true)}
+            className="p-3.5 rounded-full bg-zinc-800 border border-zinc-700 text-zinc-200 hover:bg-zinc-700 hover:text-emerald-400 transition-colors cursor-pointer relative z-30"
+            title="Add Person to Call (Up to 5 Candidates)"
+          >
+            <UserPlus className="w-5 h-5" />
+            <span className="absolute -top-1 -right-1 px-1.5 py-0.2 rounded-full bg-emerald-500 text-[9px] font-bold text-zinc-950 font-mono">
+              {candidateCount}/5
+            </span>
+          </button>
+        )}
+
         {/* End Call */}
         <button
           id="btn-end-call"
@@ -1048,6 +1283,122 @@ export const VideoCallModal: React.FC<VideoCallModalProps> = ({
           <PhoneOff className="w-5 h-5" />
         </button>
       </footer>
+
+      {/* ============================================================== */}
+      {/* Add Participant to Call Modal Dialog                           */}
+      {/* ============================================================== */}
+      {showAddModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+          <div className="w-full max-w-md rounded-2xl bg-zinc-900 border border-zinc-800 shadow-2xl p-5 select-none font-mono">
+            <div className="flex items-center justify-between pb-3 border-b border-zinc-800 mb-4">
+              <div className="flex items-center space-x-2">
+                <div className="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-400">
+                  <UserPlus className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-semibold text-zinc-100">Add Person to Call</h3>
+                  <p className="text-[11px] text-zinc-400">Mesh capacity: {candidateCount} of 5 candidates</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAddModal(false);
+                  setAddError(null);
+                }}
+                className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {addError && (
+              <div className="mb-4 p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-sans">
+                {addError}
+              </div>
+            )}
+
+            {/* Manual Peer ID input */}
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleAddParticipant(targetPeerInput);
+              }}
+              className="mb-4"
+            >
+              <label className="block text-xs text-zinc-400 mb-1.5 font-sans">
+                Enter Peer ID / UID:
+              </label>
+              <div className="flex space-x-2">
+                <input
+                  type="text"
+                  value={targetPeerInput}
+                  onChange={(e) => setTargetPeerInput(e.target.value)}
+                  placeholder="e.g. u_abc123..."
+                  className="flex-1 px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-100 text-xs focus:outline-none focus:border-emerald-500/80 font-mono"
+                  disabled={isAdding}
+                />
+                <button
+                  type="submit"
+                  disabled={!targetPeerInput.trim() || isAdding}
+                  className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 disabled:opacity-50 text-white text-xs font-medium transition-colors cursor-pointer flex items-center space-x-1"
+                >
+                  {isAdding ? (
+                    <span>Dialing...</span>
+                  ) : (
+                    <>
+                      <PhoneForwarded className="w-3.5 h-3.5" />
+                      <span>Invite</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+
+            {/* Quick-Invite from recent contacts */}
+            <div>
+              <label className="block text-xs text-zinc-400 mb-2 font-sans">
+                Quick-Invite Existing Contacts:
+              </label>
+              <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
+                {chatManager
+                  .getConversations()
+                  .filter((c) => !participants.some((p) => p.peerUid === c.peerUid) && c.peerUid !== call.peerUid).length === 0 ? (
+                  <p className="text-xs text-zinc-500 py-3 text-center font-sans">No other contacts available</p>
+                ) : (
+                  chatManager
+                    .getConversations()
+                    .filter((c) => !participants.some((p) => p.peerUid === c.peerUid) && c.peerUid !== call.peerUid)
+                    .map((c) => (
+                      <div
+                        key={c.peerUid}
+                        className="p-2 rounded-xl bg-zinc-950/60 border border-zinc-800/80 hover:border-zinc-700 flex items-center justify-between transition-colors"
+                      >
+                        <div className="min-w-0 pr-2">
+                          <div className="text-xs text-zinc-200 font-mono truncate">{c.peerUid}</div>
+                          <div className="text-[10px] text-zinc-500">Known contact</div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleAddParticipant(c.peerUid)}
+                          disabled={isAdding}
+                          className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-emerald-600 hover:text-white text-zinc-300 text-xs transition-colors cursor-pointer shrink-0 disabled:opacity-50"
+                        >
+                          + Add
+                        </button>
+                      </div>
+                    ))
+                )}
+              </div>
+            </div>
+
+            <div className="mt-4 pt-3 border-t border-zinc-800/80 text-[11px] text-zinc-500 flex items-center space-x-1.5 font-sans">
+              <Shield className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+              <span>P2P Zero-Knowledge: Unknown candidates remain anonymous until mutual handshake.</span>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

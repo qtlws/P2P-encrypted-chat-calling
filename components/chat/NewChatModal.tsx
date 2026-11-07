@@ -89,13 +89,22 @@ export const NewChatModal: React.FC<NewChatModalProps> = ({
           </div>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit} autoComplete="off" noValidate data-form-type="other" className="space-y-4">
           <div>
             <label className="block text-xs font-mono text-zinc-300 mb-1.5">Peer UID</label>
             <div className="relative">
               <input
                 id="input-peer-uid"
                 type="text"
+                name="new_chat_peer_uid_lookup"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
+                data-form-type="other"
+                data-lpignore="true"
+                data-1p-ignore="true"
+                aria-autocomplete="none"
                 placeholder="u_7f3c9d2a8e1b..."
                 value={peerUid}
                 onChange={(e) => {

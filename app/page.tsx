@@ -22,7 +22,10 @@ import { KeyChangeWarningModal } from '@/components/peer/KeyChangeWarningModal';
 import { VideoCallModal } from '@/components/call/VideoCallModal';
 import { IncomingCallBanner } from '@/components/call/IncomingCallBanner';
 import { DebugPanel } from '@/components/debug/DebugPanel';
-import { ArrowLeft, Loader2 } from 'lucide-react';
+import { MediaPermissionBanner } from '@/components/media/MediaPermissionBanner';
+import { FuturisticLoadingScreen } from '@/components/ui/FuturisticLoadingScreen';
+import { WelcomeOnboardingModal } from '@/components/onboarding/WelcomeOnboardingModal';
+import { ArrowLeft, Loader2, AlertCircle, X } from 'lucide-react';
 
 export default function AppHome() {
   const [identity, setIdentity] = useState<UserIdentity | null>(null);
@@ -31,8 +34,11 @@ export default function AppHome() {
   const [messages, setMessages] = useState<StoredMessage[]>([]);
   const [activeCall, setActiveCall] = useState<ActiveCall | null>(null);
   const [isInitializing, setIsInitializing] = useState(true);
+  const [showRelayLoading, setShowRelayLoading] = useState(true);
+  const [showWelcomeOnboarding, setShowWelcomeOnboarding] = useState(false);
+  const [isGeneratingIdentity, setIsGeneratingIdentity] = useState(false);
   const [isSignalingOnline, setIsSignalingOnline] = useState(false);
-  const [isP2PConnected, setIsP2PConnected] = useState(false);
+  const [callError, setCallError] = useState<string | null>(null);
 
   // Modals state
   const [showNewChatModal, setShowNewChatModal] = useState(false);
@@ -46,31 +52,25 @@ export default function AppHome() {
   const [mobileView, setMobileView] = useState<'sidebar' | 'chat'>('sidebar');
 
   /**
-   * Application Bootstrap Phase
+   * Application Bootstrap Phase:
+   * Inspects local storage for existing identity.
+   * If existing identity is found, boots automatically.
+   * If storage is empty, defers generation until user clicks button in WelcomeOnboardingModal.
    */
   useEffect(() => {
     let isMounted = true;
 
     async function bootstrap() {
       try {
-        // 1. Check existing identity in secureDataStorage
-        let localIdentity = await secureDataStorage.get<UserIdentity>('app:identity');
+        const localIdentity = await secureDataStorage.get<UserIdentity>('app:identity');
 
-        if (!localIdentity) {
-          // 2. Generate local cryptographic identity
-          localIdentity = createIdentity();
-          await secureDataStorage.set<UserIdentity>('app:identity', localIdentity);
+        if (localIdentity && localIdentity.uid && localIdentity.identityPrivateKey) {
+          if (!isMounted) return;
+          setIdentity(localIdentity);
+          await chatManager.initialize(localIdentity);
+          signalingClient.setUid(localIdentity.uid);
+          setIsSignalingOnline(true);
         }
-
-        if (!isMounted) return;
-        setIdentity(localIdentity);
-
-        // 3. Initialize Chat & Signaling subsystems
-        await chatManager.initialize(localIdentity);
-
-        // 4. Connect to signaling server SSE stream
-        signalingClient.setUid(localIdentity.uid);
-        setIsSignalingOnline(true);
       } catch (err) {
         console.error('[Bootstrap] Initialization error:', err);
       } finally {
@@ -91,6 +91,9 @@ export default function AppHome() {
     activeConversationIdRef.current = activeConversationId;
   }, [activeConversationId]);
 
+  const activeConversation = conversations.find((c) => c.id === activeConversationId) || null;
+  const isP2PConnected = Boolean(activeConversation?.p2pConnected);
+
   /**
    * Subscriptions to application events
    */
@@ -99,6 +102,14 @@ export default function AppHome() {
 
     const unsubConvs = chatManager.onConversationsChange((convList) => {
       setConversations(convList);
+    });
+
+    const unsubConvDeleted = chatManager.onConversationDeleted((deletedId) => {
+      if (activeConversationIdRef.current === deletedId) {
+        setActiveConversationId(null);
+        setMessages([]);
+        setMobileView('sidebar');
+      }
     });
 
     const unsubMsgs = chatManager.onMessagesChange((convId, msgs) => {
@@ -115,25 +126,16 @@ export default function AppHome() {
       setActiveCall(call);
     });
 
-    const unsubChannel = dataChannelManager.onStatusChange((peerUid, isOpen) => {
-      const activeId = activeConversationIdRef.current;
-      if (!activeId) return;
-      const conv = chatManager.getConversations().find((c) => c.id === activeId);
-      if (conv && conv.peerUid === peerUid) {
-        setIsP2PConnected(isOpen);
-      }
-    });
-
     const unsubSignaling = signalingClient.onConnectionStateChange((online) => {
       setIsSignalingOnline(online);
     });
 
     return () => {
       unsubConvs();
+      unsubConvDeleted();
       unsubMsgs();
       unsubKeyChange();
       unsubCall();
-      unsubChannel();
       unsubSignaling();
     };
   }, [identity]);
@@ -142,12 +144,6 @@ export default function AppHome() {
     setActiveConversationId(convId);
     setMessages(chatManager.getMessages(convId));
     chatManager.markConversationRead(convId);
-    const conv = chatManager.getConversations().find((c) => c.id === convId);
-    if (conv) {
-      setIsP2PConnected(dataChannelManager.isChannelOpen(conv.peerUid));
-    } else {
-      setIsP2PConnected(false);
-    }
     setMobileView('chat');
   }, []);
 
@@ -158,9 +154,12 @@ export default function AppHome() {
 
   const handleStartCall = async (peerUid: string, type: 'video' | 'audio') => {
     try {
+      setCallError(null);
       await callManager.startCall(peerUid, type);
     } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : 'Could not initiate call');
+      const msg = err instanceof Error ? err.message : 'Could not initiate call';
+      setCallError(msg);
+      setTimeout(() => setCallError(null), 9000);
     }
   };
 
@@ -169,24 +168,63 @@ export default function AppHome() {
     handleSelectConversation(conv.id);
   };
 
+  const handleGenerateIdentity = async () => {
+    setIsGeneratingIdentity(true);
+    try {
+      const newIdentity = createIdentity();
+      await secureDataStorage.set<UserIdentity>('app:identity', newIdentity);
+      setIdentity(newIdentity);
+      await chatManager.initialize(newIdentity);
+      signalingClient.setUid(newIdentity.uid);
+      setIsSignalingOnline(true);
+      setShowWelcomeOnboarding(false);
+    } catch (err) {
+      console.error('[GenerateIdentity] Error:', err);
+    } finally {
+      setIsGeneratingIdentity(false);
+    }
+  };
+
   const handleRestoreIdentity = async (newIdentity: UserIdentity) => {
     await secureDataStorage.set<UserIdentity>('app:identity', newIdentity);
     setIdentity(newIdentity);
+    setShowWelcomeOnboarding(false);
     await chatManager.initialize(newIdentity);
+    signalingClient.setUid(newIdentity.uid);
+    setIsSignalingOnline(true);
+  };
+
+  const handleDeleteConversationBothEnds = async (convId: string) => {
+    await chatManager.deleteConversationBothEnds(convId);
+    if (activeConversationId === convId) {
+      setActiveConversationId(null);
+      setMessages([]);
+      setMobileView('sidebar');
+    }
   };
 
   const handleResetIdentity = async () => {
-    await secureDataStorage.clear();
-    const newIdentity = createIdentity();
-    await secureDataStorage.set<UserIdentity>('app:identity', newIdentity);
-    setIdentity(newIdentity);
+    // 1. Wipe all connections, in-memory chats, peers, and browser storage
+    await chatManager.resetAll();
+
+    // 2. Clear all local React states
+    setIdentity(null);
     setActiveConversationId(null);
     setConversations([]);
     setMessages([]);
-    await chatManager.initialize(newIdentity);
+
+    // 3. Open Welcome Onboarding so the user generates a completely fresh identity
+    setShowWelcomeOnboarding(true);
   };
 
-  const activeConversation = conversations.find((c) => c.id === activeConversationId) || null;
+  const handleRelayLoadingComplete = () => {
+    setShowRelayLoading(false);
+    // If no identity exists in storage, show the Welcome Onboarding popup dialog
+    if (!identity) {
+      setShowWelcomeOnboarding(true);
+    }
+  };
+
   const activePeerRecord = activeConversation
     ? chatManager.getPeer(activeConversation.peerUid) || {
         uid: activeConversation.peerUid,
@@ -201,34 +239,50 @@ export default function AppHome() {
     : null;
   const activeSession = activeConversation ? chatManager.getSession(activeConversation.peerUid) || null : null;
 
-  if (isInitializing) {
-    return (
-      <div className="h-screen w-screen bg-zinc-950 flex flex-col items-center justify-center text-zinc-100 font-mono">
-        <Loader2 className="w-8 h-8 text-emerald-400 animate-spin mb-4" />
-        <h2 className="text-sm font-semibold text-zinc-200">Initializing Zero-Knowledge Environment</h2>
-        <p className="text-xs text-zinc-500 mt-1">Generating client-side keys & loading encrypted storage...</p>
-      </div>
-    );
+  // Futuristic loading screen when app opens
+  if (showRelayLoading || isInitializing) {
+    return <FuturisticLoadingScreen onComplete={handleRelayLoadingComplete} />;
   }
 
   return (
-    <div className="h-dvh h-[100dvh] w-full max-w-full bg-zinc-950 text-zinc-100 flex overflow-hidden select-none font-sans">
-      {/* Sidebar Panel */}
-      <div className={`${mobileView === 'sidebar' ? 'flex' : 'hidden md:flex'} flex-col w-full md:w-84 lg:w-96 h-full shrink-0 overflow-hidden`}>
-        <Sidebar
-          identity={identity}
-          conversations={conversations}
-          activeConversationId={activeConversationId}
-          onSelectConversation={handleSelectConversation}
-          onOpenNewChat={() => setShowNewChatModal(true)}
-          onOpenIdentityModal={() => setShowIdentityModal(true)}
-          onOpenDebugPanel={() => setShowDebugPanel(true)}
-          isSignalingOnline={isSignalingOnline}
-        />
-      </div>
+    <div className="h-dvh h-[100dvh] w-full max-w-full bg-zinc-950 text-zinc-100 flex flex-col overflow-hidden select-none font-sans relative">
+      {/* Media Permission Status & Access Request Banner */}
+      <MediaPermissionBanner />
 
-      {/* Chat Area Panel */}
-      <div className={`${mobileView === 'chat' ? 'flex' : 'hidden md:flex'} flex-1 flex-col h-full w-full min-w-0 overflow-hidden`}>
+      {/* In-App Call Alert Notification */}
+      {callError && (
+        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-50 max-w-lg w-[92%] p-3 rounded-xl bg-rose-950/90 border border-rose-600/80 shadow-2xl text-rose-200 text-xs font-mono flex items-center justify-between">
+          <div className="flex items-center space-x-2 min-w-0 pr-2">
+            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+            <span className="truncate">{callError}</span>
+          </div>
+          <button
+            onClick={() => setCallError(null)}
+            className="p-1 rounded-lg hover:bg-rose-900 text-rose-300 transition-colors cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Main Chat Workspace */}
+      <div className="flex-1 flex w-full min-h-0 overflow-hidden">
+        {/* Sidebar Panel */}
+        <div className={`${mobileView === 'sidebar' ? 'flex' : 'hidden md:flex'} flex-col w-full md:w-84 lg:w-96 h-full shrink-0 overflow-hidden border-r border-zinc-800`}>
+          <Sidebar
+            identity={identity}
+            conversations={conversations}
+            activeConversationId={activeConversationId}
+            onSelectConversation={handleSelectConversation}
+            onOpenNewChat={() => setShowNewChatModal(true)}
+            onOpenIdentityModal={() => setShowIdentityModal(true)}
+            onOpenDebugPanel={() => setShowDebugPanel(true)}
+            isSignalingOnline={isSignalingOnline}
+          />
+        </div>
+
+        {/* Chat Area Panel */}
+        <div className={`${mobileView === 'chat' ? 'flex' : 'hidden md:flex'} flex-1 flex-col h-full w-full min-w-0 overflow-hidden`}>
         <ChatArea
           identity={identity}
           conversation={activeConversation}
@@ -242,9 +296,11 @@ export default function AppHome() {
             setActiveConversationId(null);
             setMobileView('sidebar');
           }}
+          onDeleteConversationBothEnds={handleDeleteConversationBothEnds}
           isP2PConnected={isP2PConnected}
           onBack={() => setMobileView('sidebar')}
         />
+        </div>
       </div>
 
       {/* Incoming Call Ringing Banner */}
@@ -328,6 +384,14 @@ export default function AppHome() {
         activeSession={activeSession}
         isSignalingConnected={isSignalingOnline}
         isP2PConnected={isP2PConnected}
+      />
+
+      {/* Welcome Onboarding Modal (Appears when local storage has no identity) */}
+      <WelcomeOnboardingModal
+        isOpen={showWelcomeOnboarding && !identity}
+        onGenerateIdentity={handleGenerateIdentity}
+        onOpenRestore={() => setShowIdentityModal(true)}
+        isGenerating={isGeneratingIdentity}
       />
     </div>
   );

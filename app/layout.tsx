@@ -12,16 +12,16 @@ export const viewport: Viewport = {
 
 export const metadata: Metadata = {
   title: 'P2P Encrypted Chat & Calling',
-  description: 'Zero-knowledge peer-to-peer end-to-end encrypted messaging and video calling with client-side cryptographic identity and local storage.',
+  description: 'Zero-knowledge peer-to-peer end-to-end encrypted messaging and multi-party audio/video calling with client-side cryptographic identity and local storage.',
   openGraph: {
     title: 'P2P Encrypted Chat & Calling',
-    description: 'Zero-knowledge peer-to-peer end-to-end encrypted messaging and video calling with client-side cryptographic identity and local storage.',
+    description: 'Zero-knowledge peer-to-peer end-to-end encrypted messaging and multi-party audio/video calling with client-side cryptographic identity and local storage.',
     type: 'website',
   },
   twitter: {
     card: 'summary_large_image',
     title: 'P2P Encrypted Chat & Calling',
-    description: 'Zero-knowledge peer-to-peer end-to-end encrypted messaging and video calling with client-side cryptographic identity and local storage.',
+    description: 'Zero-knowledge peer-to-peer end-to-end encrypted messaging and multi-party audio/video calling with client-side cryptographic identity and local storage.',
   },
 };
 

@@ -435,6 +435,16 @@ export class PeerConnectionManager {
     }
   }
 
+  public closeAll() {
+    for (const pc of this.connections.values()) {
+      try { pc.close(); } catch {}
+    }
+    this.connections.clear();
+    this.operationQueues.clear();
+    this.makingOffer.clear();
+    this.pendingCandidates.clear();
+  }
+
   public getConnection(peerUid: string): RTCPeerConnection | undefined {
     return this.connections.get(peerUid);
   }

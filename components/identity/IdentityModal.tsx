@@ -16,6 +16,8 @@ import {
 } from 'lucide-react';
 import { UserIdentity } from '@/src/crypto/types';
 import { exportEncryptedBackup, importEncryptedBackup } from '@/src/crypto/encryption';
+import { chatManager } from '@/src/services/chat/ChatManager';
+import { Conversation, PeerRecord, StoredMessage } from '@/src/types/chat';
 
 interface IdentityModalProps {
   isOpen: boolean;
@@ -35,7 +37,11 @@ export const IdentityModal: React.FC<IdentityModalProps> = ({
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [exportPassword, setExportPassword] = useState('');
   const [importPassword, setImportPassword] = useState('');
+  const [showExportPassphrase, setShowExportPassphrase] = useState(false);
+  const [showImportPassphrase, setShowImportPassphrase] = useState(false);
   const [importJson, setImportJson] = useState('');
+  const [includeChats, setIncludeChats] = useState(true);
+  const [includePeers, setIncludePeers] = useState(true);
   const [activeTab, setActiveTab] = useState<'overview' | 'backup' | 'danger'>('overview');
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [showDangerConfirm, setShowDangerConfirm] = useState(false);
@@ -48,23 +54,41 @@ export const IdentityModal: React.FC<IdentityModalProps> = ({
     setTimeout(() => setCopiedField(null), 2000);
   };
 
-  const handleExport = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleExport = async (e?: React.SyntheticEvent) => {
+    if (e) e.preventDefault();
     if (!exportPassword) return;
 
     try {
-      const backupStr = await exportEncryptedBackup(identity, exportPassword);
+      const backupBundle = {
+        version: 2,
+        format: 'p2p-full-backup-v2',
+        createdAt: Date.now(),
+        identity: {
+          uid: identity.uid,
+          fingerprint: identity.fingerprint,
+          identityPublicKey: identity.identityPublicKey,
+          identityPrivateKey: identity.identityPrivateKey,
+          encryptionPublicKey: identity.encryptionPublicKey,
+          encryptionPrivateKey: identity.encryptionPrivateKey,
+          createdAt: identity.createdAt,
+        },
+        conversations: includeChats ? chatManager.getConversations() : [],
+        messages: includeChats ? chatManager.getAllMessages() : {},
+        peers: includePeers ? chatManager.getAllPeerRecords() : [],
+      };
+
+      const backupStr = await exportEncryptedBackup(backupBundle, exportPassword);
       const blob = new Blob([backupStr], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `p2p-identity-backup-${identity.uid.slice(0, 10)}.json`;
+      a.download = `p2p-full-backup-${identity.uid.slice(0, 10)}.json`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
 
-      setStatusMessage({ type: 'success', text: 'Encrypted backup downloaded successfully!' });
+      setStatusMessage({ type: 'success', text: 'Encrypted backup package downloaded successfully!' });
       setExportPassword('');
     } catch (err: unknown) {
       setStatusMessage({
@@ -74,18 +98,34 @@ export const IdentityModal: React.FC<IdentityModalProps> = ({
     }
   };
 
-  const handleImport = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleImport = async (e?: React.SyntheticEvent) => {
+    if (e) e.preventDefault();
     if (!importPassword || !importJson.trim()) return;
 
     try {
-      const restored = await importEncryptedBackup<UserIdentity>(importJson.trim(), importPassword);
-      if (!restored.uid || !restored.identityPrivateKey || !restored.encryptionPrivateKey) {
+      const restored = await importEncryptedBackup<any>(importJson.trim(), importPassword);
+      let targetIdentity: UserIdentity | null = null;
+      if (restored?.identity?.uid) {
+        targetIdentity = restored.identity;
+      } else if (restored?.uid && restored?.identityPrivateKey) {
+        targetIdentity = restored;
+      }
+
+      if (!targetIdentity || !targetIdentity.uid || !targetIdentity.identityPrivateKey || !targetIdentity.encryptionPrivateKey) {
         throw new Error('Invalid restored identity key structure');
       }
 
-      await onRestoreIdentity(restored);
-      setStatusMessage({ type: 'success', text: 'Identity successfully restored!' });
+      await onRestoreIdentity(targetIdentity);
+
+      if (restored.conversations || restored.messages || restored.peers) {
+        await chatManager.restoreFullBackupData(
+          restored.conversations,
+          restored.messages,
+          restored.peers
+        );
+      }
+
+      setStatusMessage({ type: 'success', text: 'Identity, chats & contacts successfully restored!' });
       setTimeout(() => onClose(), 1200);
     } catch (err: unknown) {
       setStatusMessage({
@@ -233,64 +273,183 @@ export const IdentityModal: React.FC<IdentityModalProps> = ({
         {/* Tab 2: Backup */}
         {activeTab === 'backup' && (
           <div className="space-y-5 text-xs">
-            {/* Export */}
-            <form onSubmit={handleExport} className="p-4 rounded-xl bg-zinc-950 border border-zinc-800 space-y-3">
+            {/* Export (Non-form container to prevent browser password managers from prompting to save) */}
+            <div className="p-4 rounded-xl bg-zinc-950 border border-zinc-800 space-y-3">
               <div className="flex items-center space-x-2 text-zinc-200 font-medium">
                 <Download className="w-4 h-4 text-emerald-400" />
-                <span>Export Encrypted Identity Backup</span>
+                <span>Export Encrypted Identity & Chat Backup</span>
               </div>
               <p className="text-[11px] text-zinc-400">
-                Encrypt your keys with a password and download a .json backup file.
+                Encrypt your keys, chat history, and contacts into a protected .json backup file using PBKDF2 + AES-256-GCM.
               </p>
-              <input
-                id="input-export-password"
-                type="password"
-                placeholder="Choose a strong backup passphrase..."
-                value={exportPassword}
-                onChange={(e) => setExportPassword(e.target.value)}
-                className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-emerald-500 text-xs font-mono"
-              />
+
+              {/* Scope Selection Checkboxes */}
+              <div className="space-y-2 py-1">
+                <label className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider block font-mono">
+                  Select Backup Contents
+                </label>
+
+                <div className="flex items-start space-x-2.5 p-2.5 rounded-lg bg-zinc-900/90 border border-zinc-800">
+                  <input
+                    type="checkbox"
+                    checked={true}
+                    disabled={true}
+                    className="mt-0.5 rounded text-emerald-500 bg-zinc-800 border-zinc-700"
+                  />
+                  <div>
+                    <span className="font-medium text-zinc-200">Cryptographic Identity Keys & Fingerprints</span>
+                    <span className="ml-1.5 text-[10px] text-emerald-400 font-mono">(Required)</span>
+                    <p className="text-[10px] text-zinc-400 mt-0.5 font-mono">
+                      UID, SHA-256 Fingerprint, Ed25519 & X25519 public/private keys (required to decrypt messages).
+                    </p>
+                  </div>
+                </div>
+
+                <label className="flex items-start space-x-2.5 p-2.5 rounded-lg bg-zinc-900 border border-zinc-800 hover:border-zinc-700 cursor-pointer select-none transition-colors">
+                  <input
+                    id="checkbox-backup-chats"
+                    type="checkbox"
+                    checked={includeChats}
+                    onChange={(e) => setIncludeChats(e.target.checked)}
+                    className="mt-0.5 rounded text-emerald-500 bg-zinc-800 border-zinc-700 focus:ring-0"
+                  />
+                  <div>
+                    <span className="font-medium text-zinc-200">Include Encrypted Chat Conversations & Messages</span>
+                    <p className="text-[10px] text-zinc-400 mt-0.5">
+                      Packages all conversation threads and local AES-256-GCM encrypted message logs.
+                    </p>
+                  </div>
+                </label>
+
+                <label className="flex items-start space-x-2.5 p-2.5 rounded-lg bg-zinc-900 border border-zinc-800 hover:border-zinc-700 cursor-pointer select-none transition-colors">
+                  <input
+                    id="checkbox-backup-peers"
+                    type="checkbox"
+                    checked={includePeers}
+                    onChange={(e) => setIncludePeers(e.target.checked)}
+                    className="mt-0.5 rounded text-emerald-500 bg-zinc-800 border-zinc-700 focus:ring-0"
+                  />
+                  <div>
+                    <span className="font-medium text-zinc-200">Include Users & Peer Contacts List</span>
+                    <p className="text-[10px] text-zinc-400 mt-0.5">
+                      Saves known peers, verification statuses, and authentic public keys in the export.
+                    </p>
+                  </div>
+                </label>
+              </div>
+
+              {/* Passphrase Input with toggle and anti-autofill */}
+              <div className="relative">
+                <input
+                  id="input-export-password"
+                  type={showExportPassphrase ? 'text' : 'password'}
+                  name="vault_enc_encryption_passphrase"
+                  autoComplete="new-password"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
+                  data-lpignore="true"
+                  data-1p-ignore="true"
+                  data-form-type="other"
+                  aria-autocomplete="none"
+                  placeholder="Choose a strong backup passphrase..."
+                  value={exportPassword}
+                  onChange={(e) => setExportPassword(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleExport();
+                    }
+                  }}
+                  className="w-full pr-10 px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-emerald-500 text-xs font-mono"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowExportPassphrase(!showExportPassphrase)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 transition-colors p-1"
+                  title={showExportPassphrase ? 'Hide passphrase' : 'Show passphrase'}
+                >
+                  {showExportPassphrase ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                </button>
+              </div>
+
               <button
                 id="btn-download-backup"
-                type="submit"
+                type="button"
+                onClick={() => handleExport()}
                 disabled={!exportPassword}
                 className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 disabled:opacity-40 text-white rounded-lg font-medium transition-colors"
               >
                 Download Encrypted Backup
               </button>
-            </form>
+            </div>
 
-            {/* Import */}
-            <form onSubmit={handleImport} className="p-4 rounded-xl bg-zinc-950 border border-zinc-800 space-y-3">
+            {/* Import (Non-form container to prevent browser password managers from prompting to save) */}
+            <div className="p-4 rounded-xl bg-zinc-950 border border-zinc-800 space-y-3">
               <div className="flex items-center space-x-2 text-zinc-200 font-medium">
                 <Upload className="w-4 h-4 text-emerald-400" />
-                <span>Restore Identity From Backup</span>
+                <span>Restore Identity, Chats & Contacts From Backup</span>
               </div>
               <textarea
                 id="input-import-json"
+                name="vault_restore_payload"
+                autoComplete="off"
+                spellCheck={false}
+                data-lpignore="true"
+                data-1p-ignore="true"
+                data-form-type="other"
                 placeholder="Paste backup JSON file content here..."
                 value={importJson}
                 onChange={(e) => setImportJson(e.target.value)}
                 rows={3}
                 className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-emerald-500 text-xs font-mono"
               />
-              <input
-                id="input-import-password"
-                type="password"
-                placeholder="Enter the backup passphrase..."
-                value={importPassword}
-                onChange={(e) => setImportPassword(e.target.value)}
-                className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-emerald-500 text-xs font-mono"
-              />
+
+              {/* Import Passphrase with toggle and anti-autofill */}
+              <div className="relative">
+                <input
+                  id="input-import-password"
+                  type={showImportPassphrase ? 'text' : 'password'}
+                  name="vault_restore_decryption_passphrase"
+                  autoComplete="new-password"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
+                  data-lpignore="true"
+                  data-1p-ignore="true"
+                  data-form-type="other"
+                  aria-autocomplete="none"
+                  placeholder="Enter the backup passphrase..."
+                  value={importPassword}
+                  onChange={(e) => setImportPassword(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleImport();
+                    }
+                  }}
+                  className="w-full pr-10 px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-emerald-500 text-xs font-mono"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowImportPassphrase(!showImportPassphrase)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 transition-colors p-1"
+                  title={showImportPassphrase ? 'Hide passphrase' : 'Show passphrase'}
+                >
+                  {showImportPassphrase ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                </button>
+              </div>
+
               <button
                 id="btn-restore-backup"
-                type="submit"
+                type="button"
+                onClick={() => handleImport()}
                 disabled={!importPassword || !importJson.trim()}
                 className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 disabled:opacity-40 text-zinc-100 rounded-lg font-medium transition-colors"
               >
-                Restore Identity
+                Restore Identity & Chats
               </button>
-            </form>
+            </div>
           </div>
         )}
 
@@ -303,7 +462,7 @@ export const IdentityModal: React.FC<IdentityModalProps> = ({
                 <span>Reset Cryptographic Identity</span>
               </div>
               <p className="text-[11px] text-zinc-300 leading-relaxed">
-                This will permanently delete your local identity keypairs, clear all cached peer records, and purge all locally encrypted chat histories from this browser. This action cannot be undone unless you have an exported backup file.
+                This will permanently delete your local identity keypairs, clear all cached peer records, wipe browser localStorage/sessionStorage, and purge all locally encrypted chat histories from this browser. This action cannot be undone unless you have an exported backup file.
               </p>
 
               {!showDangerConfirm ? (
@@ -323,6 +482,10 @@ export const IdentityModal: React.FC<IdentityModalProps> = ({
                       id="btn-confirm-reset-identity"
                       type="button"
                       onClick={async () => {
+                        try {
+                          localStorage.clear();
+                          sessionStorage.clear();
+                        } catch {}
                         await onResetIdentity();
                         onClose();
                       }}

@@ -148,6 +148,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <input
             id="input-search-conversations"
             type="text"
+            name="sidebar_search_peers"
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            spellCheck={false}
+            data-form-type="other"
+            data-lpignore="true"
             placeholder="Search active peers..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}

@@ -61,9 +61,8 @@ export class SignalingClient {
       this.reconnectTimeout = null;
     }
 
-    // Always start fast polling immediately so message signals are never dropped
-    this.startFastPolling();
-    this.pollPendingMessages();
+    // Flush any pending messages once upon connecting
+    this.pollPendingMessages().catch(() => {});
 
     try {
       if (this.eventSource) {
@@ -77,9 +76,12 @@ export class SignalingClient {
       this.eventSource.onopen = () => {
         this.isConnected = true;
         this.isConnecting = false;
+        // Optimization: Stop fallback polling immediately when real-time SSE stream is active!
+        this.stopFallbackPolling();
         this.notifyState(true);
         this.startHeartbeat();
-        this.pollPendingMessages();
+        // One-time flush of any envelopes queued while offline
+        this.pollPendingMessages().catch(() => {});
       };
 
       this.eventSource.onmessage = (event) => {
@@ -112,21 +114,24 @@ export class SignalingClient {
           this.eventSource = null;
         }
 
-        // Fast polling continues pulling messages in background.
-        // Schedule proactive SSE reconnect in 2 seconds
+        // Start gentle fallback polling ONLY while SSE is disconnected
+        this.startFallbackPolling();
+
+        // Schedule proactive SSE reconnect in 3 seconds
         if (!this.reconnectTimeout) {
           this.reconnectTimeout = setTimeout(() => {
             this.reconnectTimeout = null;
             if (this.uid) {
               this.connect();
             }
-          }, 2000);
+          }, 3000);
         }
       };
     } catch (err) {
       this.isConnecting = false;
       this.isConnected = false;
       this.notifyState(false);
+      this.startFallbackPolling();
       console.warn('[SignalingClient] Failed to open SSE connection:', err);
     }
   }
@@ -170,7 +175,7 @@ export class SignalingClient {
 
   public disconnect() {
     this.stopHeartbeat();
-    this.stopFastPolling();
+    this.stopFallbackPolling();
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = null;
@@ -239,17 +244,17 @@ export class SignalingClient {
     }
   }
 
-  private startFastPolling() {
-    this.stopFastPolling();
-    // Fast poll every 1200ms to guarantee zero dropped signaling envelopes
+  private startFallbackPolling() {
+    this.stopFallbackPolling();
+    // Gentle fallback poll every 6s ONLY when disconnected from SSE
     this.pollTimer = setInterval(() => {
-      if (this.uid) {
+      if (this.uid && !this.isConnected) {
         this.pollPendingMessages().catch(() => {});
       }
-    }, 1200);
+    }, 6000);
   }
 
-  private stopFastPolling() {
+  private stopFallbackPolling() {
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
@@ -258,11 +263,12 @@ export class SignalingClient {
 
   private startHeartbeat() {
     this.stopHeartbeat();
+    // Low-overhead presence heartbeat every 45s while connected
     this.heartbeatTimer = setInterval(() => {
       if (this.uid && this.isConnected) {
         this.send({ type: 'presence', uid: this.uid }).catch(() => {});
       }
-    }, 12000);
+    }, 45000);
   }
 
   private stopHeartbeat() {
