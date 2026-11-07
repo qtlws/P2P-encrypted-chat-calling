@@ -16,9 +16,12 @@ import {
   Radio,
   ArrowLeft,
   ChevronDown,
+  ExternalLink,
+  Copy,
 } from 'lucide-react';
 import { Conversation, StoredMessage } from '@/src/types/chat';
 import { UserIdentity } from '@/src/crypto/types';
+import { parseMessageSegments, isSameDay, formatDateDivider } from '@/src/lib/messageFormatting';
 
 interface ChatAreaProps {
   identity: UserIdentity | null;
@@ -29,6 +32,7 @@ interface ChatAreaProps {
   onOpenSecurityModal: () => void;
   onOpenPeerVerificationModal: () => void;
   onDeleteConversation: (id: string) => void;
+  onDeleteConversationBothEnds?: (id: string) => Promise<void>;
   isP2PConnected: boolean;
   onBack?: () => void;
 }
@@ -42,6 +46,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onOpenSecurityModal,
   onOpenPeerVerificationModal,
   onDeleteConversation,
+  onDeleteConversationBothEnds,
   isP2PConnected,
   onBack,
 }) => {
@@ -49,11 +54,26 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const [isSending, setIsSending] = useState(false);
   const [errorNotice, setErrorNotice] = useState<string | null>(null);
   const [showScrollBottomPill, setShowScrollBottomPill] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState<'none' | 'local' | 'both'>('none');
+  const [isDeletingBoth, setIsDeletingBoth] = useState(false);
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
   const prevMessagesCountRef = useRef(messages.length);
+
+  // Auto-dismiss transient notices
+  useEffect(() => {
+    if (errorNotice) {
+      const timer = setTimeout(() => setErrorNotice(null), 4000);
+      return () => clearTimeout(timer);
+    }
+  }, [errorNotice]);
+
+  const isInitiator = conversation
+    ? Boolean(conversation.isInitiator ?? (conversation.initiatorUid === identity?.uid))
+    : false;
 
   const scrollToBottom = useCallback((smooth = true) => {
     if (messagesEndRef.current) {
@@ -146,6 +166,10 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isP2PConnected) {
+      setErrorNotice('Peer is currently idle / not connected. Chat typing & messaging will enable when peer is active.');
+      return;
+    }
     if (!inputText.trim() || isSending) return;
 
     setErrorNotice(null);
@@ -160,6 +184,100 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       setErrorNotice(msg);
     } finally {
       setIsSending(false);
+    }
+  };
+
+  const handleCopyMessage = async (msgId: string, text: string) => {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedMessageId(msgId);
+      setTimeout(() => {
+        setCopiedMessageId((cur) => (cur === msgId ? null : cur));
+      }, 2000);
+    } catch (err) {
+      console.error('Failed to copy message text:', err);
+    }
+  };
+
+  const renderMessageContent = (plaintext: string, isOutgoing: boolean) => {
+    if (!plaintext) {
+      return <span className="italic text-zinc-400">[Encrypted Message]</span>;
+    }
+
+    const segments = parseMessageSegments(plaintext);
+
+    return (
+      <div className="space-y-1">
+        {segments.map((seg, idx) => {
+          if (seg.type === 'link') {
+            return (
+              <a
+                key={idx}
+                href={seg.href}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                title={`Open external link: ${seg.href} (Direct link, no preview metadata generated)`}
+                className={`inline-flex items-center space-x-0.5 underline underline-offset-2 break-all font-medium transition-colors cursor-pointer select-text ${
+                  isOutgoing
+                    ? 'text-emerald-100 hover:text-white decoration-emerald-200/80 hover:decoration-white'
+                    : 'text-cyan-300 hover:text-cyan-200 decoration-cyan-400/80 hover:decoration-cyan-200'
+                }`}
+              >
+                <span>{seg.content}</span>
+                <ExternalLink className="w-3 h-3 inline-block shrink-0 ml-0.5 opacity-80" />
+              </a>
+            );
+          }
+
+          if (seg.type === 'code') {
+            return (
+              <code
+                key={idx}
+                className={`font-mono text-xs px-1.5 py-0.5 rounded break-all select-text ${
+                  isOutgoing
+                    ? 'bg-emerald-700/60 text-emerald-100 border border-emerald-500/40'
+                    : 'bg-zinc-800/90 text-emerald-300 border border-zinc-700/60'
+                }`}
+              >
+                {seg.content}
+              </code>
+            );
+          }
+
+          if (seg.type === 'codeblock') {
+            return (
+              <pre
+                key={idx}
+                className={`my-1.5 p-2.5 rounded-lg font-mono text-xs overflow-x-auto whitespace-pre select-text ${
+                  isOutgoing
+                    ? 'bg-emerald-800/60 text-emerald-100 border border-emerald-500/40'
+                    : 'bg-zinc-950/90 text-emerald-300 border border-zinc-800'
+                }`}
+              >
+                <code>{seg.content}</code>
+              </pre>
+            );
+          }
+
+          return (
+            <span key={idx} className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+              {seg.content}
+            </span>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const handleCallClick = (type: 'audio' | 'video') => {
+    if (!isP2PConnected) {
+      setErrorNotice(`Peer is currently idle / offline. P2P ${type} call can only be placed when peer is active.`);
+      return;
+    }
+    if (conversation) {
+      onStartCall(conversation.peerUid, type);
     }
   };
 
@@ -242,9 +360,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           {/* Audio Call */}
           <button
             id="btn-start-audio-call"
-            onClick={() => onStartCall(conversation.peerUid, 'audio')}
-            title="Start P2P Audio Call"
-            className="p-1.5 sm:p-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-colors border border-zinc-700"
+            onClick={() => handleCallClick('audio')}
+            title={isP2PConnected ? "Start P2P Audio Call" : "Peer is idle. P2P audio call available when peer is active."}
+            className={`p-1.5 sm:p-2 rounded-lg transition-colors border ${
+              isP2PConnected
+                ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white border-zinc-700'
+                : 'bg-zinc-900/60 text-zinc-600 border-zinc-800/80 cursor-not-allowed opacity-50'
+            }`}
           >
             <Phone className="w-4 h-4" />
           </button>
@@ -252,21 +374,48 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           {/* Video Call */}
           <button
             id="btn-start-video-call"
-            onClick={() => onStartCall(conversation.peerUid, 'video')}
-            title="Start P2P Video Call"
-            className="p-1.5 sm:p-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition-colors"
+            onClick={() => handleCallClick('video')}
+            title={isP2PConnected ? "Start P2P Video Call" : "Peer is idle. P2P video call available when peer is active."}
+            className={`p-1.5 sm:p-2 rounded-lg transition-colors ${
+              isP2PConnected
+                ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                : 'bg-zinc-900/60 text-zinc-600 border border-zinc-800/80 cursor-not-allowed opacity-50'
+            }`}
           >
             <Video className="w-4 h-4" />
           </button>
 
-          {/* Delete conversation */}
+          {/* Initiator: Delete from both ends */}
+          {isInitiator && onDeleteConversationBothEnds && (
+            <button
+              id="btn-delete-both-ends"
+              onClick={() => {
+                if (!isP2PConnected) {
+                  setErrorNotice('Peer is currently idle. "Delete from both ends" requires peer to be active so deletion can be synchronized.');
+                  return;
+                }
+                setShowDeleteModal('both');
+              }}
+              title={
+                isP2PConnected
+                  ? "Delete chat from both ends (Initiator feature)"
+                  : "Peer is idle. 'Delete from both ends' requires peer to be active."
+              }
+              className={`flex items-center space-x-1 px-2 py-1 sm:px-2.5 sm:py-1.5 rounded-lg border transition-colors text-xs font-mono font-medium ${
+                isP2PConnected
+                  ? 'bg-rose-950/40 border-rose-800/60 hover:bg-rose-900/60 text-rose-300 cursor-pointer'
+                  : 'bg-zinc-900/60 border-zinc-800/80 text-zinc-600 opacity-50 cursor-not-allowed'
+              }`}
+            >
+              <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+              <span className="hidden sm:inline">Delete Both Ends</span>
+            </button>
+          )}
+
+          {/* Delete local conversation */}
           <button
             id="btn-delete-conversation"
-            onClick={() => {
-              if (confirm('Delete local encrypted chat records for this conversation? Counterparty retains their local copy.')) {
-                onDeleteConversation(conversation.id);
-              }
-            }}
+            onClick={() => setShowDeleteModal('local')}
             title="Delete local chat records"
             className="p-1.5 sm:p-2 rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-rose-400 transition-colors"
           >
@@ -293,54 +442,90 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           </p>
         </div>
 
-        {/* Message Items */}
-        {messages.map((msg) => {
+        {/* Message Items with Date Dividers */}
+        {messages.map((msg, index) => {
           const isOutgoing = identity ? msg.senderUid === identity.uid : false;
-          return (
-            <div
-              key={msg.id}
-              id={`message-bubble-${msg.id}`}
-              className={`flex flex-col w-full max-w-full min-w-0 ${isOutgoing ? 'items-end' : 'items-start'}`}
-            >
-              <div
-                className={`max-w-[88%] sm:max-w-[75%] px-3.5 sm:px-4 py-2 sm:py-2.5 rounded-2xl text-sm leading-relaxed shadow-sm break-words [overflow-wrap:anywhere] [word-break:break-word] ${
-                  isOutgoing
-                    ? 'bg-emerald-600 text-white rounded-br-none'
-                    : 'bg-zinc-900 border border-zinc-800 text-zinc-100 rounded-bl-none'
-                }`}
-              >
-                {/* Plaintext safe render */}
-                <span className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{msg.plaintext || '[Encrypted Message]'}</span>
+          const prevMsg = index > 0 ? messages[index - 1] : null;
+          const showDateDivider = !prevMsg || !isSameDay(prevMsg.timestamp, msg.timestamp);
 
-                {/* Metadata row */}
+          return (
+            <React.Fragment key={msg.id}>
+              {/* Date divider badge */}
+              {showDateDivider && (
+                <div className="flex items-center justify-center my-3 w-full select-none">
+                  <div className="h-px bg-zinc-800 flex-1 max-w-[80px] sm:max-w-[120px]" />
+                  <span className="mx-2.5 px-2.5 py-0.5 rounded-full bg-zinc-800/80 border border-zinc-700/50 text-[10px] font-mono text-zinc-400 font-medium tracking-wide">
+                    {formatDateDivider(msg.timestamp)}
+                  </span>
+                  <div className="h-px bg-zinc-800 flex-1 max-w-[80px] sm:max-w-[120px]" />
+                </div>
+              )}
+
+              <div
+                id={`message-bubble-${msg.id}`}
+                className={`group flex flex-col w-full max-w-full min-w-0 ${isOutgoing ? 'items-end' : 'items-start'}`}
+              >
                 <div
-                  className={`mt-1 flex items-center space-x-1.5 text-[10px] font-mono select-none ${
-                    isOutgoing ? 'text-emerald-200 justify-end' : 'text-zinc-500 justify-start'
+                  className={`relative max-w-[90%] sm:max-w-[78%] px-3.5 sm:px-4 py-2 sm:py-2.5 rounded-2xl text-sm leading-relaxed shadow-sm break-words [overflow-wrap:anywhere] [word-break:break-word] ${
+                    isOutgoing
+                      ? 'bg-emerald-600 text-white rounded-br-none'
+                      : 'bg-zinc-900 border border-zinc-800 text-zinc-100 rounded-bl-none'
                   }`}
                 >
-                  <span>
-                    {new Date(msg.timestamp).toLocaleTimeString([], {
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })}
+                  {/* Formatted Content: clickable links without previews, inline code, codeblocks, text */}
+                  {renderMessageContent(msg.plaintext || '', isOutgoing)}
+
+                  {/* Metadata row */}
+                  <div
+                    className={`mt-1.5 flex items-center space-x-1.5 text-[10px] font-mono select-none ${
+                      isOutgoing ? 'text-emerald-200 justify-end' : 'text-zinc-500 justify-start'
+                    }`}
+                  >
+                    <span>
+                      {new Date(msg.timestamp).toLocaleTimeString([], {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
+                    </span>
+
+                    {isOutgoing && (
+                      <span className="flex items-center">
+                        {msg.status === 'sending' && <Clock className="w-3 h-3 text-emerald-300 animate-spin" />}
+                        {msg.status === 'sent' && <Check className="w-3 h-3 text-emerald-300" />}
+                        {msg.status === 'delivered' && <CheckCheck className="w-3 h-3 text-emerald-200" />}
+                        {msg.status === 'failed' && <span className="text-rose-300">Failed</span>}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Sender info & copy toolbar */}
+                <div className="flex items-center space-x-1.5 mt-0.5 px-1">
+                  <span className="text-[10px] text-zinc-600 font-mono">
+                    {isOutgoing ? 'You' : `Peer ${msg.senderFingerprint ? msg.senderFingerprint.slice(0, 9) : ''}`}
                   </span>
 
-                  {isOutgoing && (
-                    <span className="flex items-center">
-                      {msg.status === 'sending' && <Clock className="w-3 h-3 text-emerald-300 animate-spin" />}
-                      {msg.status === 'sent' && <Check className="w-3 h-3 text-emerald-300" />}
-                      {msg.status === 'delivered' && <CheckCheck className="w-3 h-3 text-emerald-200" />}
-                      {msg.status === 'failed' && <span className="text-rose-300">Failed</span>}
-                    </span>
+                  {msg.plaintext && (
+                    <button
+                      id={`btn-copy-${msg.id}`}
+                      type="button"
+                      onClick={() => handleCopyMessage(msg.id, msg.plaintext || '')}
+                      title={copiedMessageId === msg.id ? 'Copied to clipboard!' : 'Copy message text'}
+                      className="opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity p-0.5 rounded hover:bg-zinc-800 text-zinc-500 hover:text-zinc-300"
+                    >
+                      {copiedMessageId === msg.id ? (
+                        <span className="flex items-center text-[10px] text-emerald-400 font-mono">
+                          <Check className="w-2.5 h-2.5 mr-0.5" />
+                          <span>Copied</span>
+                        </span>
+                      ) : (
+                        <Copy className="w-2.5 h-2.5" />
+                      )}
+                    </button>
                   )}
                 </div>
               </div>
-
-              {/* Sender fingerprint hint */}
-              <span className="text-[10px] text-zinc-600 font-mono mt-0.5 px-1">
-                {isOutgoing ? 'You' : `Peer ${msg.senderFingerprint ? msg.senderFingerprint.slice(0, 9) : ''}`}
-              </span>
-            </div>
+            </React.Fragment>
           );
         })}
 
@@ -362,49 +547,192 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       )}
 
       {/* Active Transport Status Bar */}
-      {!isP2PConnected && (
-        <div className="px-2.5 sm:px-4 py-1.5 bg-zinc-900/90 border-t border-zinc-800/80 flex items-center justify-between text-xs text-zinc-400 w-full min-w-0 overflow-hidden shrink-0">
+      {!isP2PConnected ? (
+        <div id="peer-idle-banner" className="px-2.5 sm:px-4 py-2 bg-amber-950/30 border-t border-amber-900/40 flex items-center justify-between text-xs text-amber-300 w-full min-w-0 overflow-hidden shrink-0">
           <div className="flex items-center space-x-2 min-w-0">
-            <Radio className="w-3.5 h-3.5 text-emerald-400 animate-pulse shrink-0" />
-            <span className="text-[10px] sm:text-[11px] font-mono truncate">
-              Direct WebRTC DataChannel negotiating. Encrypted messaging & calls active.
+            <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse shrink-0" />
+            <span className="text-[11px] font-mono truncate">
+              Peer status: <span className="font-semibold text-amber-200">Idle</span>. Messaging & calls will activate once peer is active.
+            </span>
+          </div>
+        </div>
+      ) : (
+        <div id="peer-active-banner" className="px-2.5 sm:px-4 py-1.5 bg-emerald-950/20 border-t border-emerald-900/30 flex items-center justify-between text-xs text-emerald-300 w-full min-w-0 overflow-hidden shrink-0">
+          <div className="flex items-center space-x-2 min-w-0">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
+            <span className="text-[10px] sm:text-[11px] font-mono text-emerald-400 truncate">
+              Direct P2P DataChannel Active &bull; Zero-Knowledge E2EE Verified
             </span>
           </div>
         </div>
       )}
 
       {errorNotice && (
-        <div className="px-2.5 sm:px-4 py-2 bg-rose-950/40 border-t border-rose-900/40 flex items-center space-x-2 text-xs text-rose-300 w-full min-w-0 shrink-0">
+        <div className="px-2.5 sm:px-4 py-2 bg-rose-950/50 border-t border-rose-900/50 flex items-center space-x-2 text-xs text-rose-300 w-full min-w-0 shrink-0 animate-in fade-in duration-150">
           <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
           <span className="truncate">{errorNotice}</span>
         </div>
       )}
 
-      {/* Message Input Bar */}
+      {/* Message Input Bar with multiline support and anti-autofill */}
       <form
         id="chat-input-form"
         onSubmit={handleSend}
-        className="p-2 sm:p-3 border-t border-zinc-800 bg-zinc-900/95 flex items-center space-x-2 w-full max-w-full min-w-0 shrink-0 pb-[max(0.65rem,env(safe-area-inset-bottom))]"
+        autoComplete="off"
+        noValidate
+        data-form-type="other"
+        className="p-2 sm:p-3 border-t border-zinc-800 bg-zinc-900/95 flex items-end space-x-2 w-full max-w-full min-w-0 shrink-0 pb-[max(0.65rem,env(safe-area-inset-bottom))]"
       >
-        <input
-          id="input-message"
-          type="text"
-          placeholder="Type an encrypted message..."
-          value={inputText}
-          onChange={(e) => setInputText(e.target.value)}
-          className="flex-1 min-w-0 min-h-[42px] sm:min-h-[44px] bg-zinc-950 border border-zinc-800 rounded-xl px-3 sm:px-4 py-2 sm:py-2.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-emerald-500 transition-colors"
-        />
+        <div
+          className="flex-1 min-w-0 relative"
+          onClick={() => {
+            if (!isP2PConnected) {
+              setErrorNotice('Peer is currently idle / not connected. Chat typing & messaging will enable when peer is active.');
+            }
+          }}
+        >
+          <textarea
+            id="input-message"
+            name="ephemeral_p2p_chat_field"
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            spellCheck={false}
+            data-form-type="other"
+            data-lpignore="true"
+            data-1p-ignore="true"
+            aria-autocomplete="none"
+            rows={1}
+            disabled={!isP2PConnected || isSending}
+            placeholder={
+              isP2PConnected
+                ? 'Type an encrypted message... (Shift+Enter for newline)'
+                : 'Peer is idle. Chat input will open when peer is active (P2P)...'
+            }
+            value={inputText}
+            onChange={(e) => setInputText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                if (isP2PConnected && inputText.trim() && !isSending) {
+                  handleSend(e);
+                }
+              }
+            }}
+            className={`w-full min-h-[42px] max-h-32 resize-none border rounded-xl px-3 sm:px-4 py-2 sm:py-2.5 text-sm transition-colors ${
+              isP2PConnected
+                ? 'bg-zinc-950 border-zinc-800 text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-emerald-500'
+                : 'bg-zinc-950/60 border-zinc-800/60 text-zinc-500 placeholder-zinc-600 cursor-not-allowed'
+            }`}
+          />
+        </div>
 
         <button
           id="btn-send-message"
           type="submit"
-          disabled={!inputText.trim() || isSending}
-          className="min-h-[42px] sm:min-h-[44px] px-3 sm:px-4 py-2 sm:py-2.5 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 disabled:opacity-40 text-white rounded-xl font-medium text-sm transition-colors flex items-center space-x-1.5 shadow-sm shrink-0"
+          disabled={!isP2PConnected || !inputText.trim() || isSending}
+          className="min-h-[42px] px-3 sm:px-4 py-2 sm:py-2.5 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 disabled:opacity-30 disabled:cursor-not-allowed text-white rounded-xl font-medium text-sm transition-colors flex items-center space-x-1.5 shadow-sm shrink-0 mb-0.5"
         >
           <span className="hidden sm:inline">Send</span>
           <Send className="w-3.5 h-3.5" />
         </button>
       </form>
+
+      {/* Delete Confirmation Modal */}
+      {showDeleteModal === 'both' && (
+        <div id="modal-delete-both" className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-zinc-900 border border-rose-900/60 rounded-2xl p-6 shadow-2xl space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center space-x-3 text-rose-400">
+              <div className="w-10 h-10 rounded-xl bg-rose-950/60 border border-rose-800/80 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5 text-rose-400" />
+              </div>
+              <div>
+                <h3 className="font-semibold text-base text-zinc-100">Delete Chat From Both Ends</h3>
+                <span className="text-xs text-rose-300 font-mono">Initiator Privilege</span>
+              </div>
+            </div>
+            <p className="text-xs text-zinc-300 leading-relaxed">
+              A deletion request will be sent to the counterparty device. This will permanently erase this conversation and all encrypted message histories from <strong className="text-white">both your device and the peer&apos;s device</strong>, and remove each other from the chat list. This action cannot be undone.
+            </p>
+            <div className="flex items-center justify-end space-x-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowDeleteModal('none')}
+                disabled={isDeletingBoth}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                id="btn-confirm-delete-both"
+                type="button"
+                disabled={isDeletingBoth}
+                onClick={async () => {
+                  if (!onDeleteConversationBothEnds || !conversation) return;
+                  if (!isP2PConnected) {
+                    setErrorNotice('Peer is currently idle. Cannot delete from both ends while peer is not active.');
+                    setShowDeleteModal('none');
+                    return;
+                  }
+                  setIsDeletingBoth(true);
+                  try {
+                    await onDeleteConversationBothEnds(conversation.id);
+                    setShowDeleteModal('none');
+                  } catch (err: unknown) {
+                    setErrorNotice(err instanceof Error ? err.message : 'Failed to delete chat from both ends');
+                  } finally {
+                    setIsDeletingBoth(false);
+                  }
+                }}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white text-xs font-semibold transition-colors flex items-center space-x-1.5"
+              >
+                {isDeletingBoth ? 'Purging both devices...' : 'Delete From Both Ends'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showDeleteModal === 'local' && (
+        <div id="modal-delete-local" className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-zinc-900 border border-zinc-800 rounded-2xl p-6 shadow-2xl space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center space-x-3 text-zinc-300">
+              <div className="w-10 h-10 rounded-xl bg-zinc-800 border border-zinc-700 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5 text-zinc-400" />
+              </div>
+              <div>
+                <h3 className="font-semibold text-base text-zinc-100">Delete Local Chat</h3>
+                <span className="text-xs text-zinc-400 font-mono">This device only</span>
+              </div>
+            </div>
+            <p className="text-xs text-zinc-300 leading-relaxed">
+              Delete local encrypted chat records for this conversation on this device? The counterparty will retain their local copy on their device.
+            </p>
+            <div className="flex items-center justify-end space-x-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowDeleteModal('none')}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                id="btn-confirm-delete-local"
+                type="button"
+                onClick={() => {
+                  if (conversation) {
+                    onDeleteConversation(conversation.id);
+                  }
+                  setShowDeleteModal('none');
+                }}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition-colors"
+              >
+                Delete for Me Only
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 };

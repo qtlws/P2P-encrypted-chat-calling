@@ -3,6 +3,7 @@
  */
 
 import { EncryptedEnvelope } from '@/src/crypto/types';
+export type { PeerRecord } from '@/src/types/peer';
 
 export interface StoredMessage {
   id: string; // Unique UUID
@@ -33,4 +34,6 @@ export interface Conversation {
   unreadCount: number;
   onlineStatus?: 'online' | 'offline';
   p2pConnected?: boolean;
+  isInitiator?: boolean;
+  initiatorUid?: string;
 }

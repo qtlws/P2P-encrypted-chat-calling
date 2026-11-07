@@ -49,6 +49,7 @@ export class ChatManager {
   private messageListeners: Set<MessageChangeHandler> = new Set();
   private keyChangeListeners: Set<KeyChangeHandler> = new Set();
   private connectionListeners: Set<ConnectionStatusHandler> = new Set();
+  private conversationDeletedListeners: Set<(conversationId: string) => void> = new Set();
 
   private pendingHandshakeNonces = new Map<string, string>(); // peerUid -> myNonce
 
@@ -57,9 +58,19 @@ export class ChatManager {
    */
   public async initialize(identity: UserIdentity): Promise<void> {
     this.identity = identity;
+    this.conversations.clear();
+    this.messages.clear();
+    this.peerRecords.clear();
+    this.sessions.clear();
+    this.processedMessageIds.clear();
+    this.pendingHandshakeNonces.clear();
+
     signalingClient.setUid(identity.uid);
     peerConnectionManager.setLocalUid(identity.uid);
     callManager.setLocalUid(identity.uid);
+    callManager.setOnCallEndHandler((peerUid) => {
+      this.reconnectPeer(peerUid);
+    });
 
     // Setup WebRTC and DataChannel callbacks
     peerConnectionManager.setCallbacks(
@@ -86,11 +97,57 @@ export class ChatManager {
       this.handleSignalingMessage(signal);
     });
 
+    // Setup browser visibility and network online reconnect listeners
+    if (typeof window !== 'undefined') {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && this.identity) {
+          this.reconnectExistingPeers();
+        }
+      });
+      window.addEventListener('online', () => {
+        if (this.identity) {
+          this.reconnectExistingPeers();
+        }
+      });
+    }
+
     // Hydrate persistent storage
     await this.hydrateFromStorage();
 
     // Auto-ping existing peers if any to re-establish WebRTC sessions
     this.reconnectExistingPeers();
+  }
+
+  /**
+   * Complete reset: closes all WebRTC/DataChannel links, clears memory and storage
+   */
+  public async resetAll(): Promise<void> {
+    // 1. Close all WebRTC and DataChannel links
+    peerConnectionManager.closeAll();
+    dataChannelManager.closeAll();
+
+    // 2. Disconnect signaling
+    signalingClient.disconnect();
+
+    // 3. Clear all in-memory collections
+    this.conversations.clear();
+    this.messages.clear();
+    this.peerRecords.clear();
+    this.sessions.clear();
+    this.processedMessageIds.clear();
+    this.sessionResolvers.clear();
+    this.pendingHandshakeNonces.clear();
+    this.identity = null;
+
+    // 4. Wipe persistent storage
+    try {
+      localStorage.clear();
+      sessionStorage.clear();
+    } catch {}
+    await secureDataStorage.clear();
+
+    // 5. Notify subscribers of cleared state
+    this.notifyConversations();
   }
 
   public getIdentity(): UserIdentity | null {
@@ -142,6 +199,9 @@ export class ChatManager {
       savedConvs.forEach((c) => {
         c.p2pConnected = false;
         c.onlineStatus = 'offline';
+        if (c.isInitiator === undefined) {
+          c.isInitiator = c.initiatorUid ? c.initiatorUid === this.identity?.uid : true;
+        }
         this.conversations.set(c.id, c);
       });
     }
@@ -162,27 +222,52 @@ export class ChatManager {
   }
 
   /**
+   * Reconnects an individual peer's direct P2P DataChannel session
+   */
+  public async reconnectPeer(peerUid: string) {
+    if (!this.identity) return;
+    const conv = Array.from(this.conversations.values()).find((c) => c.peerUid === peerUid);
+    if (!conv) return;
+
+    // If channel is already open, mark active
+    if (dataChannelManager.isChannelOpen(peerUid)) {
+      conv.p2pConnected = true;
+      conv.onlineStatus = 'online';
+      this.notifyConversations();
+      return;
+    }
+
+    try {
+      const handshake = createHandshakePayload(this.identity, peerUid);
+      this.pendingHandshakeNonces.set(peerUid, handshake.nonce);
+      const transportPacket = await packSecureTransportMessage({
+        subType: 'handshake-init',
+        senderUid: this.identity.uid,
+        recipientUid: peerUid,
+        senderSigningKey: this.identity.identityPrivateKey,
+        senderFingerprint: this.identity.fingerprint,
+        payload: handshake,
+      });
+      await signalingClient.send(transportPacket);
+    } catch (err) {
+      console.warn(`[ChatManager] Reconnect error for peer ${peerUid}:`, err);
+    }
+  }
+
+  /**
    * Proactively attempts handshake reconnect for previously saved contacts
    */
-  private async reconnectExistingPeers() {
+  public async reconnectExistingPeers() {
     if (!this.identity) return;
     for (const conv of this.conversations.values()) {
-      try {
-        const handshake = createHandshakePayload(this.identity, conv.peerUid);
-        this.pendingHandshakeNonces.set(conv.peerUid, handshake.nonce);
-        const transportPacket = await packSecureTransportMessage({
-          subType: 'handshake-init',
-          senderUid: this.identity.uid,
-          recipientUid: conv.peerUid,
-          senderSigningKey: this.identity.identityPrivateKey,
-          senderFingerprint: this.identity.fingerprint,
-          payload: handshake,
-        });
-        signalingClient.send(transportPacket).catch(() => {});
-      } catch {
-        // Silently skip offline peers
+      if (!dataChannelManager.isChannelOpen(conv.peerUid)) {
+        await this.reconnectPeer(conv.peerUid);
+      } else {
+        conv.p2pConnected = true;
+        conv.onlineStatus = 'online';
       }
     }
+    this.notifyConversations();
   }
 
   /**
@@ -208,10 +293,16 @@ export class ChatManager {
         unreadCount: 0,
         p2pConnected: false,
         onlineStatus: 'online',
+        isInitiator: true,
+        initiatorUid: this.identity.uid,
       };
       this.conversations.set(conversationId, conv);
       await this.persistConversations();
       this.notifyConversations();
+    } else {
+      conv.isInitiator = true;
+      conv.initiatorUid = this.identity.uid;
+      await this.persistConversations();
     }
 
     // Step 1: Send handshake-init to peer via signaling
@@ -328,6 +419,10 @@ export class ChatManager {
           callManager.handleParticipantLeft(unpackedPayload?.peerUid || peerUid);
           break;
         }
+        case 'chat-delete-both': {
+          await this.handleRemoteChatDeleteBoth(peerUid, unpackedPayload?.conversationId);
+          break;
+        }
         case 'message-ack': {
           if (unpackedPayload) {
             this.handleIncomingAck(unpackedPayload);
@@ -350,6 +445,10 @@ export class ChatManager {
       }
       case 'chat-message': {
         await this.handleIncomingWireMessage(signal.fromUid || signal.from, signal.payload);
+        break;
+      }
+      case 'chat-delete-both': {
+        await this.handleRemoteChatDeleteBoth(signal.fromUid || signal.from, signal.payload?.conversationId);
         break;
       }
       case 'message-ack': {
@@ -568,6 +667,8 @@ export class ChatManager {
         unreadCount: 0,
         p2pConnected: false,
         onlineStatus: 'online',
+        isInitiator: false,
+        initiatorUid: fromUid,
       };
       this.conversations.set(conversationId, conv);
       await this.persistConversations();
@@ -576,6 +677,10 @@ export class ChatManager {
       conv.peerEncryptionPublicKey = peerIdentity.encryptionPublicKey;
       conv.onlineStatus = 'online';
       conv.verified = peerIdentity.verified;
+      if (conv.isInitiator === undefined) {
+        conv.isInitiator = false;
+        conv.initiatorUid = fromUid;
+      }
       await this.persistConversations();
     }
 
@@ -644,6 +749,8 @@ export class ChatManager {
         unreadCount: 0,
         p2pConnected: false,
         onlineStatus: 'online',
+        isInitiator: true,
+        initiatorUid: this.identity.uid,
       };
       this.conversations.set(conversationId, conv);
     } else {
@@ -651,6 +758,8 @@ export class ChatManager {
       conv.peerEncryptionPublicKey = peerIdentity.encryptionPublicKey;
       conv.onlineStatus = 'online';
       conv.verified = peerIdentity.verified;
+      conv.isInitiator = true;
+      conv.initiatorUid = this.identity.uid;
     }
 
     await this.persistConversations();
@@ -801,6 +910,11 @@ export class ChatManager {
     if (payload.type === 'message-ack') {
       const ack = payload as WireAck;
       this.handleIncomingAck(ack);
+      return;
+    }
+
+    if (payload.type === 'chat-delete-both') {
+      await this.handleRemoteChatDeleteBoth(peerUid, payload.conversationId);
       return;
     }
 
@@ -986,7 +1100,10 @@ export class ChatManager {
       blocked: ('blocked' in peerIdentity ? peerIdentity.blocked : existing?.blocked) ?? false,
     };
     this.peerRecords.set(record.uid, record);
+    await this.persistPeerRecords();
+  }
 
+  private async persistPeerRecords() {
     const allPeers: Record<string, PeerRecord> = {};
     this.peerRecords.forEach((v, k) => {
       allPeers[k] = v;
@@ -1046,11 +1163,186 @@ export class ChatManager {
   }
 
   public async deleteConversation(conversationId: string) {
+    const conv = this.conversations.get(conversationId);
+    const peerUid = conv?.peerUid;
+
+    this.conversations.delete(conversationId);
+    this.messages.delete(conversationId);
+    if (peerUid) {
+      this.peerRecords.delete(peerUid);
+      await this.persistPeerRecords();
+      peerConnectionManager.closeConnection(peerUid);
+    }
+    await secureDataStorage.remove(`app:messages:${conversationId}`);
+    await this.persistConversations();
+    this.notifyConversations();
+    this.notifyConversationDeleted(conversationId);
+  }
+
+  /**
+   * Delete chat from BOTH ends:
+   * Only the initiator of the secure chat session has the cryptographic right to execute this.
+   * Sends remote instruction to counterparty, tears down P2P channel, and purges all local records.
+   */
+  public async deleteConversationBothEnds(conversationId: string): Promise<void> {
+    if (!this.identity) throw new Error('Identity not initialized');
+    const conv = this.conversations.get(conversationId);
+    if (!conv) return;
+
+    const isInitiator = conv.isInitiator ?? (conv.initiatorUid === this.identity.uid);
+    if (!isInitiator) {
+      throw new Error('Only the conversation initiator has permission to delete from both ends.');
+    }
+
+    const peerUid = conv.peerUid;
+    const deletePayload = {
+      type: 'chat-delete-both',
+      conversationId,
+      initiatorUid: this.identity.uid,
+      timestamp: Date.now(),
+    };
+
+    // 1. Deliver via WebRTC DataChannel if currently active
+    dataChannelManager.send(peerUid, deletePayload);
+
+    // 2. Deliver via SecureTransportPacket signaling envelope
+    try {
+      const packet = await packSecureTransportMessage({
+        subType: 'chat-delete-both',
+        senderUid: this.identity.uid,
+        recipientUid: peerUid,
+        senderSigningKey: this.identity.identityPrivateKey,
+        senderFingerprint: this.identity.fingerprint,
+        payload: deletePayload,
+      });
+      await signalingClient.send(packet);
+    } catch {
+      // Direct signaling fallback
+      await signalingClient.send({
+        type: 'chat-delete-both',
+        fromUid: this.identity.uid,
+        toUid: peerUid,
+        payload: deletePayload,
+      }).catch(() => {});
+    }
+
+    // 3. Teardown active WebRTC link
+    peerConnectionManager.closeConnection(peerUid);
+
+    // 4. Remove contact/peer record from address book
+    this.peerRecords.delete(peerUid);
+    await this.persistPeerRecords();
+
+    // 5. Erase local conversation & encrypted messages
     this.conversations.delete(conversationId);
     this.messages.delete(conversationId);
     await secureDataStorage.remove(`app:messages:${conversationId}`);
     await this.persistConversations();
+
+    // 6. Notify active listeners
     this.notifyConversations();
+    this.notifyConversationDeleted(conversationId);
+  }
+
+  /**
+   * Handle incoming remote chat-delete-both instruction from the initiator
+   */
+  public async handleRemoteChatDeleteBoth(fromUid: string, conversationId?: string): Promise<void> {
+    let conv = conversationId ? this.conversations.get(conversationId) : undefined;
+    if (!conv) {
+      conv = Array.from(this.conversations.values()).find((c) => c.peerUid === fromUid);
+    }
+
+    const targetConvId = conv?.id || conversationId;
+    if (targetConvId) {
+      this.conversations.delete(targetConvId);
+      this.messages.delete(targetConvId);
+      await secureDataStorage.remove(`app:messages:${targetConvId}`);
+    }
+
+    peerConnectionManager.closeConnection(fromUid);
+    this.peerRecords.delete(fromUid);
+    await this.persistPeerRecords();
+    await this.persistConversations();
+
+    this.notifyConversations();
+    if (targetConvId) {
+      this.notifyConversationDeleted(targetConvId);
+    }
+  }
+
+  /**
+   * Returns all stored messages keyed by conversationId for full backup export
+   */
+  public getAllMessages(): Record<string, StoredMessage[]> {
+    const result: Record<string, StoredMessage[]> = {};
+    this.messages.forEach((msgs, convId) => {
+      result[convId] = msgs;
+    });
+    return result;
+  }
+
+  /**
+   * Returns all registered peer records for full backup export
+   */
+  public getAllPeerRecords(): PeerRecord[] {
+    return Array.from(this.peerRecords.values());
+  }
+
+  /**
+   * Restores full backup data including conversations, messages, and contact peers
+   */
+  public async restoreFullBackupData(
+    conversations?: Conversation[],
+    messages?: Record<string, StoredMessage[]>,
+    peers?: PeerRecord[]
+  ): Promise<void> {
+    if (peers && Array.isArray(peers)) {
+      for (const p of peers) {
+        if (p?.uid) this.peerRecords.set(p.uid, p);
+      }
+      await this.persistPeerRecords();
+    }
+
+    if (conversations && Array.isArray(conversations)) {
+      for (const c of conversations) {
+        if (c?.id) {
+          c.p2pConnected = false;
+          c.onlineStatus = 'offline';
+          this.conversations.set(c.id, c);
+        }
+      }
+      await this.persistConversations();
+    }
+
+    if (messages && typeof messages === 'object') {
+      for (const [convId, list] of Object.entries(messages)) {
+        if (Array.isArray(list)) {
+          this.messages.set(convId, list);
+          await this.persistMessages(convId);
+        }
+      }
+    }
+
+    this.notifyConversations();
+    this.reconnectExistingPeers();
+  }
+
+  public onConversationDeleted(handler: (conversationId: string) => void): () => void {
+    this.conversationDeletedListeners.add(handler);
+    return () => {
+      this.conversationDeletedListeners.delete(handler);
+    };
+  }
+
+  private notifyConversationDeleted(conversationId: string) {
+    for (const h of this.conversationDeletedListeners) {
+      try {
+        h(conversationId);
+      } catch (err) {
+        console.error('[ChatManager] Deletion listener exception:', err);
+      }
+    }
   }
 
   private async persistConversations() {

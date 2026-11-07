@@ -118,5 +118,11 @@ export type SignalMessage =
   | {
       type: 'peer-offline';
       targetUid: string;
+    }
+  | {
+      type: 'chat-delete-both';
+      fromUid: string;
+      toUid: string;
+      conversationId: string;
     };
 

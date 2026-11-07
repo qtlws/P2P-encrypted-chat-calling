@@ -20,6 +20,11 @@ export class CallManager {
   private localUid: string | null = null;
   private listeners: Set<CallChangeHandler> = new Set();
   private senders: Map<string, RTCRtpSender[]> = new Map();
+  private onCallEndHandler: ((peerUid: string) => void) | null = null;
+
+  public setOnCallEndHandler(handler: (peerUid: string) => void) {
+    this.onCallEndHandler = handler;
+  }
 
   public setLocalUid(uid: string) {
     this.localUid = uid;
@@ -516,7 +521,65 @@ export class CallManager {
   }
 
   /**
-   * Counterparty accepted call -> Caller initiates WebRTC offer
+   * Proactively add a new candidate to the active call (up to 5 candidates total)
+   */
+  public async addParticipantToCall(newPeerUid: string): Promise<void> {
+    if (!this.localUid) throw new Error('Local identity not initialized');
+    if (!this.activeCall || (this.activeCall.state !== 'connected' && this.activeCall.state !== 'calling')) {
+      throw new Error('No active call to add candidate to');
+    }
+
+    if (newPeerUid === this.localUid) {
+      throw new Error('Cannot add yourself to the call');
+    }
+
+    // Check capacity limit: 1 local + up to 4 remote = 5 total candidates
+    if (this.activeCall.participants.length >= MAX_CALL_CANDIDATES - 1) {
+      throw new Error('Call is at maximum capacity (5 candidates)');
+    }
+
+    // Check if candidate is already in call
+    if (this.activeCall.participants.some((p) => p.peerUid === newPeerUid)) {
+      throw new Error('Candidate is already in this call');
+    }
+
+    // Ensure local stream is active
+    let stream = this.activeCall.localStream;
+    if (!stream) {
+      stream = await mediaManager.acquireMedia(this.activeCall.callType === 'video', true);
+      this.activeCall.localStream = stream;
+    }
+
+    // Prepare connection & DataChannel
+    const pc = peerConnectionManager.createFreshConnectionForCall(newPeerUid);
+    dataChannelManager.createDataChannel(newPeerUid, pc);
+
+    // Attach local media tracks
+    const peerSenders: RTCRtpSender[] = [];
+    stream.getTracks().forEach((track) => {
+      const sender = pc.addTrack(track, stream!);
+      peerSenders.push(sender);
+    });
+    this.senders.set(newPeerUid, peerSenders);
+
+    // Add candidate to participants list
+    this.activeCall.participants.push({
+      peerUid: newPeerUid,
+      joinedAt: Date.now(),
+    });
+    this.notify();
+
+    // Send call invite to the new candidate
+    await signalingClient.send({
+      type: 'call-invite',
+      fromUid: this.localUid,
+      toUid: newPeerUid,
+      callType: this.activeCall.callType,
+    });
+  }
+
+  /**
+   * Counterparty accepted call -> Caller initiates WebRTC offer and meshes other participants
    */
   public async handleCallAccepted(fromUid: string) {
     if (!this.activeCall) return;
@@ -537,6 +600,33 @@ export class CallManager {
 
     // Outgoing caller creates offer to negotiate audio/video tracks
     await peerConnectionManager.createOffer(fromUid);
+
+    // If there are other remote participants already in the call, coordinate mesh:
+    const otherParticipants = this.activeCall.participants.filter((p) => p.peerUid !== fromUid);
+    if (otherParticipants.length > 0 && this.localUid) {
+      const allParticipants = [this.localUid, ...this.activeCall.participants.map((p) => p.peerUid)];
+      for (const other of otherParticipants) {
+        signalingClient.send({
+          type: 'call-mesh-join',
+          fromUid: this.localUid,
+          toUid: other.peerUid,
+          newPeerUid: fromUid,
+          callType: this.activeCall.callType,
+          shouldInitiate: true,
+          allParticipants,
+        }).catch(() => {});
+
+        signalingClient.send({
+          type: 'call-mesh-join',
+          fromUid: this.localUid,
+          toUid: fromUid,
+          newPeerUid: other.peerUid,
+          callType: this.activeCall.callType,
+          shouldInitiate: false,
+          allParticipants,
+        }).catch(() => {});
+      }
+    }
   }
 
   /**
@@ -562,8 +652,17 @@ export class CallManager {
       if (this.activeCall.peerUid === fromUid && this.activeCall.participants.length > 0) {
         this.activeCall.peerUid = this.activeCall.participants[0].peerUid;
       }
-      peerConnectionManager.closeConnection(fromUid, true);
+      const pc = peerConnectionManager.getConnection(fromUid);
+      if (pc && pc.connectionState !== 'closed' && pc.signalingState !== 'closed') {
+        const senders = this.senders.get(fromUid) || [];
+        for (const sender of senders) {
+          try { pc.removeTrack(sender); } catch {}
+        }
+      }
       this.senders.delete(fromUid);
+      if (this.onCallEndHandler) {
+        this.onCallEndHandler(fromUid);
+      }
       this.notify();
       return;
     }
@@ -678,11 +777,16 @@ export class CallManager {
       stream.addTrack(event.track);
     }
 
-    participant.stream = stream;
+    // Ensure audio track is enabled
+    event.track.enabled = true;
+
+    // Create fresh MediaStream reference so React state updates trigger playback
+    const freshStream = new MediaStream(stream.getTracks());
+    participant.stream = freshStream;
 
     // Set primary remote stream if matching or unset
     if (this.activeCall.peerUid === peerUid || !this.activeCall.remoteStream) {
-      this.activeCall.remoteStream = stream;
+      this.activeCall.remoteStream = freshStream;
     }
 
     this.activeCall.state = 'connected';
@@ -771,12 +875,22 @@ export class CallManager {
   private endLocalCall() {
     const participants = this.activeCall ? [...this.activeCall.participants] : [];
     mediaManager.stopMedia();
-    this.senders.clear();
-    this.activeCall = null;
 
     for (const p of participants) {
-      peerConnectionManager.closeConnection(p.peerUid, true);
+      const pc = peerConnectionManager.getConnection(p.peerUid);
+      if (pc && pc.connectionState !== 'closed' && pc.signalingState !== 'closed') {
+        const senders = this.senders.get(p.peerUid) || [];
+        for (const sender of senders) {
+          try { pc.removeTrack(sender); } catch {}
+        }
+      }
+      if (this.onCallEndHandler) {
+        this.onCallEndHandler(p.peerUid);
+      }
     }
+
+    this.senders.clear();
+    this.activeCall = null;
     this.notify();
   }
 }

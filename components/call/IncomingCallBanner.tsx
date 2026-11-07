@@ -1,9 +1,10 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Phone, PhoneOff, Video, User, Shield } from 'lucide-react';
 import { ActiveCall } from '@/src/types/webrtc';
 import { chatManager } from '@/src/services/chat/ChatManager';
+import { callRingtone } from '@/src/lib/callRingtone';
 
 interface IncomingCallBannerProps {
   call: ActiveCall | null;
@@ -16,7 +17,20 @@ export const IncomingCallBanner: React.FC<IncomingCallBannerProps> = ({
   onAccept,
   onReject,
 }) => {
-  if (!call || call.state !== 'incoming') return null;
+  const isIncoming = call?.state === 'incoming';
+
+  useEffect(() => {
+    if (isIncoming) {
+      callRingtone.startRingtone();
+    } else {
+      callRingtone.stopRingtone();
+    }
+    return () => {
+      callRingtone.stopRingtone();
+    };
+  }, [isIncoming]);
+
+  if (!call || !isIncoming) return null;
 
   const isKnown = chatManager.isPeerKnown(call.peerUid);
   const callerLabel = isKnown ? call.peerUid : 'Anonymous Peer';
